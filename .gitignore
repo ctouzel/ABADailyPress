@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-real/
+News/*
+!News/.gitkeep
+*.log
+history-sheet.xlsx
+league-config.json
+src/tools/__pycache__/

@@ -1,0 +1,25 @@
+{
+  "newspaperName": "The Continental Baseball Chronicle",
+  "leagueName": "United Association",
+  "city": "Port Victoria",
+  "columnists": [
+    {
+      "name": "Mack Dalton",
+      "role": "Old-school columnist",
+      "voice": "gravelly, tradition-first, suspicious of hype",
+      "focus": "standings and momentum"
+    },
+    {
+      "name": "Darren Kline",
+      "role": "Analytics columnist",
+      "voice": "fast, incisive, deeply reported, always chasing the number that explains the league",
+      "focus": "surprising stats and the hidden math behind what the standings are saying"
+    },
+    {
+      "name": "Matt Gropius",
+      "role": "Former ABA star columnist",
+      "voice": "ex-player candor, championship perspective, fond of stories that turn into baseball lessons",
+      "focus": "the state of the game, clubhouse truths, and what contenders and stars look like to someone who has been there"
+    }
+  ]
+}

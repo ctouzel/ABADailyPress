@@ -1,0 +1,12 @@
+{
+  "name": "aba-daily-press",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generates the ABA Daily Press newspaper from OOTP 26 HTML exports (Modern Broadsheet design).",
+  "scripts": {
+    "build": "node ./src/index.mjs",
+    "start": "node ./src/index.mjs",
+    "serve": "node ./src/serveEdition.mjs"
+  }
+}
