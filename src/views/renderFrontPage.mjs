@@ -22,9 +22,14 @@ export function renderFrontPageHtml(snapshot, columns, config) {
   const city = config?.city ?? "Grand Harbor";
 
   const featuredHeadlines = (snapshot.headlines ?? []).slice(0, 6);
+  const mastheadDateLabel = withLeagueYear(snapshot.leagueDateLabel, snapshot);
 
   const featured = pickFeaturedDivision(snapshot.standingsSections ?? [], snapshot.leagueDateLabel);
-  const battingSnippet = findLeaderboard(snapshot.battingLeaderboards, "Batting AVG");
+  const featuredLeaderboard = pickFeaturedLeaderboard(
+    snapshot.battingLeaderboards ?? [],
+    snapshot.pitchingLeaderboards ?? [],
+    snapshot.leagueDateLabel,
+  );
 
   return `<!doctype html>
 <html lang="en">
@@ -51,7 +56,7 @@ export function renderFrontPageHtml(snapshot, columns, config) {
   <header class="masthead">
     <h1>${escapeHtml(newspaperName)}</h1>
     <div class="masthead-meta">
-      <span>${escapeHtml(snapshot.leagueDateLabel ?? "")}</span>
+      <span>${escapeHtml(mastheadDateLabel)}</span>
       <span>${escapeHtml(formatMode(snapshot.currentMode))}</span>
     </div>
   </header>
@@ -64,7 +69,7 @@ export function renderFrontPageHtml(snapshot, columns, config) {
     <aside class="sidebar">
       ${renderThreeStars(snapshot.threeStarsOfDay ?? [])}
       ${featured ? renderStandingsSnippet(featured) : ""}
-      ${battingSnippet ? renderLeadersSnippet(battingSnippet) : ""}
+      ${featuredLeaderboard ? renderLeadersSnippet(featuredLeaderboard) : ""}
       ${renderOpinionSnippet(columns ?? [])}
     </aside>
   </div>
@@ -76,6 +81,8 @@ export function renderFrontPageHtml(snapshot, columns, config) {
   ${renderPennantRaces(snapshot.standingsSections ?? [])}
 
   ${renderOpinionSection(columns ?? [])}
+
+  ${renderLeadersSection(snapshot.battingLeaderboards ?? [], snapshot.pitchingLeaderboards ?? [])}
 
   ${renderFooterTicker(snapshot.injuries ?? [], snapshot.transactions ?? [])}
 
@@ -274,9 +281,11 @@ function renderStandingsSnippet(featured) {
 }
 
 function renderLeadersSnippet(leaderboard) {
+  const labelText = leaderboard.category ? `${leaderboard.category}: ${leaderboard.label}` : leaderboard.label;
+
   return `
     <div class="sidebar-block">
-      <div class="label">Leaders &mdash; ${escapeHtml(leaderboard.label)}</div>
+      <div class="label">Leaders &mdash; ${escapeHtml(labelText)}</div>
       <table>
         ${leaderboard.entries
           .slice(0, 5)
@@ -290,6 +299,7 @@ function renderLeadersSnippet(leaderboard) {
           )
           .join("")}
       </table>
+      <a class="jump-link" href="#leaders-section">See full leaders &darr;</a>
     </div>
   `;
 }
@@ -393,7 +403,6 @@ function renderBoxScores(games) {
       <div class="label">Last Night's Scores</div>
       <div class="scores-grid">
         ${games
-          .slice(0, 5)
           .map(
             (game) => `
               <div class="score-card">
@@ -411,10 +420,15 @@ function renderBoxScores(games) {
 
 function formatDecisionLine(game) {
   const parts = [
-    game.winningPitcher ? `W: ${game.winningPitcher}` : "",
+    game.winningPitcher
+      ? `W: ${game.winningPitcher}${game.winningPitcherRecord ? ` (${game.winningPitcherRecord})` : ""}`
+      : "",
+    game.losingPitcher
+      ? `L: ${game.losingPitcher}${game.losingPitcherRecord ? ` (${game.losingPitcherRecord})` : ""}`
+      : "",
     game.savePitcher ? `S: ${game.savePitcher}${game.savePitcherRecord ? ` (${game.savePitcherRecord})` : ""}` : "",
   ].filter(Boolean);
-  return parts.join(" • ");
+  return parts.join(" | ");
 }
 
 // ---------- pennant races (full standings) ----------
@@ -473,7 +487,60 @@ function renderStandingsTable(section) {
   `;
 }
 
-// ---------- footer ticker ----------
+// ---------- league leaders (full batting + pitching leaderboards) ----------
+
+function renderLeadersSection(battingLeaderboards, pitchingLeaderboards) {
+  if (!battingLeaderboards.length && !pitchingLeaderboards.length) {
+    return "";
+  }
+
+  const groups = [
+    { key: "batting", title: "Batting", boards: battingLeaderboards },
+    { key: "pitching", title: "Pitching", boards: pitchingLeaderboards },
+  ].filter((group) => group.boards.length);
+
+  return `
+    <section id="leaders-section" class="leaders-section">
+      <div class="label">League Leaders</div>
+      <div class="conference-grid" style="grid-template-columns: repeat(${groups.length || 1}, 1fr);">
+        ${groups
+          .map(
+            (group) => `
+              <div class="conference-column">
+                <div class="conf-label">${escapeHtml(group.title)}</div>
+                <div class="leaders-stack">
+                  ${group.boards.map(renderLeaderboardTable).join("")}
+                </div>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderLeaderboardTable(leaderboard) {
+  return `
+    <div class="division-block">
+      <span class="sublabel">${escapeHtml(leaderboard.label)}</span>
+      <table>
+        ${leaderboard.entries
+          .map(
+            (entry) => `
+              <tr>
+                <td>${escapeHtml(entry.player)} &bull; ${escapeHtml(teamCode(entry.team))}</td>
+                <td class="value">${escapeHtml(entry.value)}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </div>
+  `;
+}
+
+// ---------- injury report & transactions wire ----------
 
 function renderFooterTicker(injuries, transactions) {
   if (!injuries.length && !transactions.length) {
@@ -481,11 +548,107 @@ function renderFooterTicker(injuries, transactions) {
   }
 
   return `
-    <section class="footer-ticker">
-      ${injuries.length ? `<div class="ticker-row injuries"><strong>Injuries:</strong> ${injuries.slice(0, 4).map((item) => escapeHtml(item.summary)).join(" • ")}</div>` : ""}
-      ${transactions.length ? `<div class="ticker-row"><strong>Transactions:</strong> ${transactions.slice(0, 4).map((item) => escapeHtml(item.summary)).join(" • ")}</div>` : ""}
+    <section class="wire-section">
+      <div class="wire-grid">
+        ${injuries.length ? renderWireColumn("Injury Report", injuries, 12) : ""}
+        ${transactions.length ? renderWireColumn("Transactions", transactions, 12) : ""}
+      </div>
     </section>
   `;
+}
+
+function renderWireColumn(title, items, limit) {
+  const shown = items.slice(0, limit);
+  const remaining = items.length - shown.length;
+
+  return `
+    <div class="wire-column">
+      <div class="label">${escapeHtml(title)}</div>
+      <ul class="wire-list">
+        ${shown.map(renderWireItem).join("")}
+      </ul>
+      ${remaining > 0 ? `<div class="wire-more">+ ${remaining} more move${remaining === 1 ? "" : "s"} not shown</div>` : ""}
+    </div>
+  `;
+}
+
+function renderWireItem(item) {
+  const dateLabel = formatWireDate(item.date);
+  const parsed = splitWireSummary(item.summary);
+
+  return `
+    <li class="wire-item">
+      <div class="wire-item-head">
+        ${dateLabel ? `<span class="wire-date">${escapeHtml(dateLabel)}</span>` : ""}
+        ${parsed ? `<span class="wire-team">${escapeHtml(parsed.team)}</span>` : `<span class="tag-inline">Trade</span>`}
+      </div>
+      <div class="wire-detail">${escapeHtml(parsed ? parsed.detail : tidyWireText(item.summary))}</div>
+    </li>
+  `;
+}
+
+// Splits an OOTP transaction/injury summary of the shape "Team Name : detail
+// text" into its team and detail parts. Trade summaries ("The X traded ...
+// to the Y...") don't follow that shape, so those fall back to a single
+// detail line tagged "Trade" instead.
+function splitWireSummary(summary) {
+  const separatorIndex = summary.indexOf(" : ");
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  return {
+    team: summary.slice(0, separatorIndex).trim(),
+    detail: tidyWireText(summary.slice(separatorIndex + 3)),
+  };
+}
+
+// OOTP summaries carry stray spaces before punctuation ("Released RP Wade
+// LeBlanc .") — tidy that up for a cleaner read.
+function tidyWireText(text) {
+  return text.trim().replace(/\s+([.,])/g, "$1");
+}
+
+// OOTP dates look like "Tuesday, June 6th , 2034" — this trims that down to
+// a compact "Jun 6" wire-style date label.
+function formatWireDate(dateLabel) {
+  if (!dateLabel) return "";
+  const match = dateLabel.match(/,\s*([A-Za-z]+)\s+(\d+)/);
+  if (!match) return "";
+  const [, month, day] = match;
+  return `${month.slice(0, 3)} ${day}`;
+}
+
+// snapshot.leagueDateLabel doesn't carry a year (e.g. "Monday, June 5"), but
+// the raw injury/transaction dates do ("Tuesday, June 6th , 2034"). Pull the
+// year from whichever item's month/day matches the masthead date, falling
+// back to the first year found among those dates if nothing matches exactly.
+function withLeagueYear(dateLabel, snapshot) {
+  if (!dateLabel) return dateLabel ?? "";
+
+  const monthDay = dateLabel.match(/,\s*([A-Za-z]+)\s+(\d+)/);
+  const candidates = [...(snapshot.injuries ?? []), ...(snapshot.transactions ?? [])];
+
+  if (monthDay) {
+    const [, month, day] = monthDay;
+    const exact = candidates.find((item) => {
+      const parsed = item.date?.match(/,\s*([A-Za-z]+)\s+(\d+)\D*(\d{4})/);
+      return parsed && parsed[1] === month && parsed[2] === day;
+    });
+    const exactYear = exact?.date.match(/(\d{4})/)?.[1];
+    if (exactYear) {
+      return `${dateLabel}, ${exactYear}`;
+    }
+  }
+
+  for (const item of candidates) {
+    const year = item.date?.match(/(\d{4})/)?.[1];
+    if (year) {
+      return `${dateLabel}, ${year}`;
+    }
+  }
+
+  return dateLabel;
 }
 
 // ---------- data helpers ----------
@@ -522,8 +685,22 @@ function rotationIndex(dateLabel, count) {
   return hash % count;
 }
 
-function findLeaderboard(leaderboards, label) {
-  return (leaderboards ?? []).find((board) => board.label === label) ?? (leaderboards ?? [])[0] ?? null;
+// Picks the leaderboard shown in the sidebar's compact Leaders snippet.
+// Rotates through every batting and pitching category by league date (like
+// pickFeaturedDivision) instead of always showing the same one. Uses a
+// different hash salt than the standings pick so the two snippets don't
+// always change together.
+function pickFeaturedLeaderboard(battingLeaderboards, pitchingLeaderboards, dateLabel) {
+  const pool = [
+    ...battingLeaderboards.map((board) => ({ ...board, category: "Batting" })),
+    ...pitchingLeaderboards.map((board) => ({ ...board, category: "Pitching" })),
+  ].filter((board) => board.entries?.length);
+
+  if (!pool.length) {
+    return null;
+  }
+
+  return pool[rotationIndex(`${dateLabel}|leaders`, pool.length)];
 }
 
 function groupByConference(sections) {
@@ -597,6 +774,8 @@ const pageStyles = `
     --rule: oklch(0.82 0.01 80);
     --green: oklch(0.40 0.09 152);
     --green-soft: oklch(0.94 0.03 152);
+    --amber: oklch(0.55 0.13 55);
+    --amber-soft: oklch(0.94 0.035 65);
   }
   *{box-sizing:border-box;}
   body{margin:0; background:var(--bg); color:var(--ink); font-family:"Newsreader",Georgia,"Times New Roman",serif;}
@@ -615,7 +794,7 @@ const pageStyles = `
   .lead-column{display:flex; flex-direction:column; gap:32px;}
   .tag{display:inline-block; background:var(--green); color:#fff; font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; padding:4px 10px; margin-bottom:12px;}
   .dateline{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); letter-spacing:.04em; margin-bottom:12px;}
-  .news-snippet .label, .news-section > .label, .opinion-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
+  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
   .headline-list{list-style:none; margin:14px 0 0 0; padding:0; display:flex; flex-direction:column;}
   .headline-list li{padding:14px 0; border-bottom:1px solid var(--rule);}
   .headline-list li:first-child{padding-top:0;}
@@ -647,10 +826,10 @@ const pageStyles = `
   .opinion-headline-link:hover{color:var(--green);}
   .byline{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); margin-top:4px;}
   .scores-strip{padding:32px 32px 0 32px;}
-  .scores-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:14px; margin-top:14px;}
+  .scores-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(230px,1fr)); gap:14px; margin-top:14px;}
   .score-card{border:1px solid var(--rule); padding:12px; font-family:"IBM Plex Sans",sans-serif; font-size:13px;}
   .score-line{display:flex; justify-content:space-between;}
-  .score-meta{color:var(--ink-soft); font-size:11px; margin-top:8px;}
+  .score-meta{color:var(--ink-soft); font-size:11px; margin-top:8px; line-height:1.5;}
   .news-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
   .news-articles{display:flex; flex-direction:column; gap:8px; margin-top:20px;}
   .news-article{padding-bottom:32px; margin-bottom:32px; border-bottom:1px solid var(--rule);}
@@ -666,6 +845,8 @@ const pageStyles = `
   .conf-label{font-family:"IBM Plex Sans",sans-serif; font-size:13px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; border-bottom:1px solid var(--ink); padding-bottom:8px; margin-bottom:16px;}
   .division-stack{display:flex; flex-direction:column; gap:20px;}
   .sublabel{font-family:"IBM Plex Sans",sans-serif; font-size:11.5px; letter-spacing:.08em; font-weight:700; text-transform:uppercase; color:var(--green); display:block;}
+  .leaders-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
+  .leaders-stack{display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:20px 24px; align-items:start;}
   .opinion-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .opinion-articles{display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:28px; margin-top:20px; align-items:start;}
   .opinion-article{padding:22px; border:1px solid var(--rule); border-radius:6px; background:oklch(0.995 0.003 80); box-shadow:0 1px 2px oklch(0.18 0.012 260 / 0.05);}
@@ -677,7 +858,18 @@ const pageStyles = `
   .opinion-article p{font-size:13.5px; line-height:1.55; margin:0 0 10px 0;}
   .opinion-article p:last-child{margin-bottom:0;}
   .opinion-article .article-list{font-size:13.5px; line-height:1.55;}
-  .footer-ticker{margin-top:40px; padding:16px 32px; font-family:"IBM Plex Sans",sans-serif; font-size:13px;}
-  .ticker-row{margin-bottom:8px;}
-  .ticker-row.injuries{background:var(--green-soft); border-top:1px solid var(--rule); border-bottom:1px solid var(--rule); padding:12px 0; margin:0 -32px 8px -32px; padding-left:32px; padding-right:32px;}
+  .wire-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .wire-grid{display:grid; grid-template-columns:1fr 1fr; gap:40px; margin-top:20px;}
+  @media (max-width: 700px){ .wire-grid{grid-template-columns:1fr;} }
+  .wire-column:first-child .label{border-bottom-color:var(--amber);}
+  .wire-list{list-style:none; margin:16px 0 0 0; padding:0; display:flex; flex-direction:column;}
+  .wire-column:first-child .wire-list{background:var(--amber-soft); padding:2px 14px; border-radius:2px;}
+  .wire-item{padding:10px 0; border-bottom:1px solid var(--rule); font-family:"IBM Plex Sans",sans-serif;}
+  .wire-item:first-child{padding-top:0;}
+  .wire-item:last-child{border-bottom:none;}
+  .wire-item-head{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;}
+  .wire-date{font-size:10.5px; letter-spacing:.04em; color:var(--ink-soft); flex-shrink:0;}
+  .wire-team{font-size:12.5px; font-weight:700; color:var(--ink);}
+  .wire-detail{font-size:13px; line-height:1.5; color:var(--ink-soft); margin-top:3px;}
+  .wire-more{margin-top:12px; font-size:11.5px; color:var(--ink-soft); font-style:italic;}
 `;
