@@ -21,7 +21,7 @@ export function renderFrontPageHtml(snapshot, columns, config) {
   const leagueName = config?.leagueName ?? "American Baseball League";
   const city = config?.city ?? "Grand Harbor";
 
-  const featuredHeadlines = (snapshot.headlines ?? []).slice(0, 6);
+  const featuredHeadlines = dedupeHeadlines(snapshot.headlines ?? []).slice(0, 6);
   const mastheadDateLabel = withLeagueYear(snapshot.leagueDateLabel, snapshot);
 
   const featured = pickFeaturedDivision(snapshot.standingsSections ?? [], snapshot.leagueDateLabel);
@@ -49,7 +49,7 @@ export function renderFrontPageHtml(snapshot, columns, config) {
       <span class="dim">${escapeHtml(leagueName)}</span>
     </div>
     <div class="util-right">
-      <span>News</span><span>Opinion</span><span>Standings</span><span>Leaders</span><span>Schedule</span>
+      <a href="#news-section">News</a><a href="#opinion-section">Opinion</a><a href="#pennant-races">Standings</a><a href="#leaders-section">Leaders</a><a href="#schedule">Schedule</a>
     </div>
   </div>
 
@@ -76,6 +76,8 @@ export function renderFrontPageHtml(snapshot, columns, config) {
 
   ${renderBoxScores(snapshot.lastDayScores ?? [])}
 
+  ${renderPlayoffRace(snapshot.championshipChase)}
+
   ${renderNewsSection(featuredHeadlines)}
 
   ${renderPennantRaces(snapshot.standingsSections ?? [])}
@@ -85,6 +87,8 @@ export function renderFrontPageHtml(snapshot, columns, config) {
   ${renderLeadersSection(snapshot.battingLeaderboards ?? [], snapshot.pitchingLeaderboards ?? [])}
 
   ${renderFooterTicker(snapshot.injuries ?? [], snapshot.transactions ?? [])}
+
+  ${renderSchedule(snapshot.scheduledGames ?? [])}
 
 </div>
 </body>
@@ -102,7 +106,7 @@ function renderHeadlineList(headlines) {
           .map(
             (headline, index) => `
               <li>
-                <a class="headline-link" href="#news-${index}">${escapeHtml(headline.title)}</a>
+                <a class="headline-link" href="#news-${index}">${escapeHtml(summarizeHeadline(headline))}</a>
                 <div class="headline-meta">
                   <span class="tag-inline">${escapeHtml(inferTag(headline))}</span>
                   ${headline.date ? `<span class="dim">${escapeHtml(headline.date)}</span>` : ""}
@@ -131,7 +135,7 @@ function renderNewsSection(headlines) {
             (headline, index) => `
               <article id="news-${index}" class="news-article">
                 <div class="tag">${escapeHtml(inferTag(headline))}</div>
-                <h3>${escapeHtml(headline.title)}</h3>
+                <h3>${escapeHtml(summarizeHeadline(headline))}</h3>
                 ${headline.date ? `<div class="dateline">${escapeHtml(headline.date.toUpperCase())}</div>` : ""}
                 ${formatArticleBody(headline.fullText || headline.summary || "")}
               </article>
@@ -141,6 +145,65 @@ function renderNewsSection(headlines) {
       </div>
     </section>
   `;
+}
+
+// Some OOTP-generated headlines are just the raw transaction sentence dumped
+// as the title ("The X traded ... to the Y , getting ... in return."),
+// which reads as a wall of text in a headline slot. Condense a completed
+// trade into "<Team> acquires <POS> <Player> from <Team>", built around
+// whichever player in the deal matters most (the oldest, most of the time).
+// Anything else that's still unusually long falls back to a plain
+// truncation so it never blows out the headline layout.
+function summarizeHeadline(headline) {
+  const title = String(headline?.title ?? "").trim();
+  return summarizeTradeHeadline(title) ?? truncateHeadline(title);
+}
+
+const TRADE_SENTENCE = /^The (.+?) traded (.+?) to the (.+?)\s*,\s*getting (.+?) in return\.?$/;
+
+function summarizeTradeHeadline(title) {
+  const match = title.match(TRADE_SENTENCE);
+  if (!match) {
+    return null;
+  }
+
+  const [, teamA, givenByA, teamB, givenByB] = match;
+  const players = [
+    ...extractTradedPlayers(givenByA).map((player) => ({ ...player, ownerAfter: teamB })),
+    ...extractTradedPlayers(givenByB).map((player) => ({ ...player, ownerAfter: teamA })),
+  ];
+
+  if (!players.length) {
+    return null;
+  }
+
+  const keyPlayer = players.reduce((best, player) => (player.age > best.age ? player : best));
+  const acquirer = keyPlayer.ownerAfter;
+  const other = acquirer === teamA ? teamB : teamA;
+
+  return `${shortenTeamName(acquirer)} acquires ${keyPlayer.position} ${keyPlayer.name} from ${shortenTeamName(other)}`;
+}
+
+// Pulls every "<age>-year old [minor league] <POS> <Name>" player mention out
+// of one side of a trade sentence. Cash and retained-salary notes don't
+// match (no age/position to anchor on), which is what we want — only real
+// players are candidates for "most important asset in the deal".
+function extractTradedPlayers(text) {
+  const pattern = /(\d+)-year old(?:\s+minor league)?\s+([A-Z0-9]{1,3})\s+([A-Z][\w.'-]*(?:\s[A-Z][\w.'-]*)*)/g;
+  return [...text.matchAll(pattern)].map((match) => ({
+    age: Number(match[1]),
+    position: match[2],
+    name: match[3].trim(),
+  }));
+}
+
+function truncateHeadline(title, maxLength = 100) {
+  if (title.length <= maxLength) {
+    return title;
+  }
+  const truncated = title.slice(0, maxLength);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return `${lastSpace > 40 ? truncated.slice(0, lastSpace) : truncated}…`;
 }
 
 // Splits article text into paragraphs, and turns paragraphs that are really
@@ -223,6 +286,35 @@ function inferTag(headline) {
   if (/injur|strain|surgery/.test(text)) return "Injury";
   if (/streak|milestone|award|honor/.test(text)) return "Feat";
   return "News";
+}
+
+// OOTP often exports the same story more than once (e.g. a "Player of the
+// Week" recap turns up as its own news page and again as a home-page
+// blurb) with different titles but identical body text. Keep the first
+// occurrence — it carries the higher relevance score, which is also the
+// fuller, more official-sounding headline — and drop the rest so the same
+// story never fills two headline slots.
+function dedupeHeadlines(headlines) {
+  const seenText = new Set();
+  const seenTitle = new Set();
+
+  return headlines.filter((headline) => {
+    const fullText = String(headline.fullText ?? "").trim();
+    if (fullText) {
+      if (seenText.has(fullText)) {
+        return false;
+      }
+      seenText.add(fullText);
+      return true;
+    }
+
+    const title = String(headline.title ?? "").trim().toLowerCase();
+    if (title && seenTitle.has(title)) {
+      return false;
+    }
+    seenTitle.add(title);
+    return true;
+  });
 }
 
 // ---------- sidebar ----------
@@ -429,6 +521,177 @@ function formatDecisionLine(game) {
     game.savePitcher ? `S: ${game.savePitcher}${game.savePitcherRecord ? ` (${game.savePitcherRecord})` : ""}` : "",
   ].filter(Boolean);
   return parts.join(" | ");
+}
+
+// ---------- championship chase (the real ABA playoff bracket) ----------
+//
+// snapshot.championshipChase is already fully computed by the data pipeline
+// (snapshotBuilder.mjs) with the ABA's actual format: 3 division winners
+// (seeds 1-3) plus the top 2 remaining teams per conference (seeds 4-5) play
+// a Wild Card Series; the winner joins the #1 seed (a bye past wild card
+// round) in the Division Series, while #2 plays #3; the two Division Series
+// winners meet in the Conference Series; the two conference champions meet
+// in the Championship Series. This just renders that structure — no
+// seeding/standings logic is re-derived here.
+
+function renderPlayoffRace(championshipChase) {
+  const cc = championshipChase;
+  if (!cc || !cc.conferences?.length) {
+    return "";
+  }
+
+  const [first, second] = cc.conferences;
+
+  return `
+    <section id="playoff-race" class="playoff-section">
+      <div class="label">Championship Chase</div>
+      <div class="playoff-meta">${escapeHtml(cc.title ?? "Projected Playoff Bracket")} &bull; ${escapeHtml(cc.dateLabel ?? "")}</div>
+      <div class="bracket-grid">
+        ${first ? renderConferenceBracket(first) : "<div></div>"}
+        ${renderFinalBracket(cc)}
+        ${second ? renderConferenceBracket(second) : "<div></div>"}
+      </div>
+      ${renderHuntRow(cc.conferences)}
+    </section>
+  `;
+}
+
+function renderConferenceBracket(conference) {
+  const labels = conference.seriesLabels ?? {};
+  const wildcardRound = conference.rounds?.wildcard ?? [];
+  const divisionRound = conference.rounds?.division ?? [];
+  const conferenceRound = conference.rounds?.conference ?? [];
+  const wildcardWinnerLabel = wildcardRound[0]?.placeholderWinner;
+
+  return `
+    <div class="bracket-panel">
+      <div class="conf-label">${escapeHtml(conference.label ?? "")}</div>
+      ${
+        wildcardRound.length
+          ? `
+            <div class="round-label">${escapeHtml(labels.wildcard ?? "Wild Card Series")}</div>
+            <div class="bracket">
+              ${wildcardRound.map((entry) => renderMatchupCard(entry.matchup, {})).join("")}
+            </div>
+          `
+          : ""
+      }
+      ${
+        divisionRound.length
+          ? `
+            <div class="round-label">${escapeHtml(labels.division ?? "Division Series")}</div>
+            <div class="bracket">
+              ${divisionRound.map((entry) => renderMatchupCard(entry.matchup, { byePlaceholder: wildcardWinnerLabel })).join("")}
+            </div>
+          `
+          : ""
+      }
+      ${
+        conferenceRound.length
+          ? `
+            <div class="round-label">${escapeHtml(labels.conference ?? "Conference Series")}</div>
+            <div class="bracket">
+              ${conferenceRound.map((entry) => renderMatchupCard(entry.matchup, {})).join("")}
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderFinalBracket(cc) {
+  return `
+    <div class="bracket-panel bracket-panel-final">
+      <div class="conf-label">ABA Final</div>
+      <div class="round-label">${escapeHtml(cc.championshipSeriesLabel ?? "Championship Series")}</div>
+      <div class="bracket">
+        ${renderMatchupCard(cc.championshipMatchup ?? [], {})}
+      </div>
+    </div>
+  `;
+}
+
+function renderHuntRow(conferences) {
+  const withHunt = (conferences ?? []).filter((conference) => conference.inTheHunt?.length);
+  if (!withHunt.length) {
+    return "";
+  }
+
+  return `
+    <div class="hunt-grid">
+      ${withHunt
+        .map(
+          (conference) => `
+            <div class="hunt-panel">
+              <span class="sublabel">In the Hunt &mdash; ${escapeHtml(conference.label ?? "")}</span>
+              <table>
+                ${conference.inTheHunt
+                  .map(
+                    (team) => `
+                      <tr>
+                        <td>${escapeHtml(shortenTeamName(team.team))}</td>
+                        <td>${escapeHtml(team.record ?? "")}</td>
+                        <td class="value">${escapeHtml(formatGb(team.gb))}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </table>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+// A matchup slot is either a real team object (has `.team`), a named
+// placeholder object (`{ placeholder: "..." }`, used for rounds that haven't
+// been reached yet, e.g. "Division Series winner"), or null/undefined (the
+// #1 seed's bye slot in the Division Series, waiting on the Wild Card
+// Series — `byePlaceholder` supplies that round's winner-to-be label).
+function renderMatchupCard([a, b] = [], { byePlaceholder } = {}) {
+  return `
+    <div class="bracket-matchup">
+      ${renderMatchupSlot(a, byePlaceholder)}
+      <div class="bracket-vs">vs</div>
+      ${renderMatchupSlot(b, byePlaceholder)}
+    </div>
+  `;
+}
+
+function renderMatchupSlot(entry, byePlaceholder) {
+  if (!entry) {
+    return `<div class="bracket-team-empty">${escapeHtml(byePlaceholder ?? "TBD")}</div>`;
+  }
+
+  if (entry.placeholder) {
+    return `<div class="bracket-team-empty">${escapeHtml(entry.placeholder)}</div>`;
+  }
+
+  return `
+    <div class="bracket-team">
+      <img class="team-logo" src="${escapeHtml(logoRelativePath(entry.logoUrl))}" alt="" loading="lazy" onerror="this.remove()">
+      <div class="bracket-team-info">
+        <div class="bracket-team-name">${entry.seed ? `<span class="dim small">#${escapeHtml(entry.seed)}</span> ` : ""}${escapeHtml(shortenTeamName(entry.team))}</div>
+        <div class="bracket-team-meta">${escapeHtml(entry.record ?? "")}${entry.gb && entry.gb !== "-" ? ` &bull; ${escapeHtml(entry.gb)} GB` : ""}</div>
+      </div>
+    </div>
+  `;
+}
+
+// logoUrl points into the live OOTP export ("/news/images/team_logos/...")
+// which isn't copied into dist/ — reference it as a relative path so it
+// works automatically once/if that folder is published alongside the page,
+// and degrades invisibly (onerror removes the <img>) until then.
+function logoRelativePath(logoUrl) {
+  return String(logoUrl ?? "").replace(/^\/+/, "");
+}
+
+// GB of "-" means tied for the spot — show it bare rather than "- GB".
+function formatGb(gb) {
+  return gb && gb !== "-" ? `${gb} GB` : gb ?? "";
 }
 
 // ---------- pennant races (full standings) ----------
@@ -651,6 +914,74 @@ function withLeagueYear(dateLabel, snapshot) {
   return dateLabel;
 }
 
+// ---------- schedule (today's probable pitchers & series context) ----------
+
+function renderSchedule(games) {
+  if (!games.length) {
+    return "";
+  }
+
+  return `
+    <section id="schedule" class="schedule-section">
+      <div class="label">Today's Schedule</div>
+      <div class="schedule-grid">
+        ${games.map(renderScheduleCard).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderScheduleCard(game) {
+  return `
+    <div class="schedule-card">
+      ${game.time ? `<div class="schedule-time">${escapeHtml(game.time)}</div>` : ""}
+      <div class="schedule-matchup">
+        ${renderScheduleTeam(game, "away")}
+        <div class="schedule-at">at</div>
+        ${renderScheduleTeam(game, "home")}
+      </div>
+      ${renderScheduleSeries(game.seriesContext)}
+    </div>
+  `;
+}
+
+function renderScheduleTeam(game, side) {
+  const team = game[`${side}Team`];
+  const record = game[`${side}Record`];
+  const pitcher = game[`${side}ProbablePitcher`];
+
+  return `
+    <div class="schedule-team">
+      <img class="team-logo" src="${escapeHtml(logoRelativePath(game[`${side}LogoUrl`]))}" alt="" loading="lazy" onerror="this.remove()">
+      <div class="schedule-team-info">
+        <div class="schedule-team-name">${escapeHtml(team ?? "")}${record ? ` <span class="dim small">(${escapeHtml(record)})</span>` : ""}</div>
+        ${
+          pitcher?.name
+            ? `<div class="schedule-pitcher">${escapeHtml(pitcher.name)}${pitcher.line ? ` <span class="dim small">${escapeHtml(pitcher.line)}</span>` : ""}</div>`
+            : `<div class="schedule-pitcher dim small">Probable pitcher TBA</div>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduleSeries(seriesContext) {
+  if (!seriesContext) {
+    return "";
+  }
+
+  const parts = [
+    seriesContext.gameNumber ? `Game ${seriesContext.gameNumber}` : "",
+    seriesContext.leaderText ?? "",
+  ].filter(Boolean);
+
+  if (!parts.length) {
+    return "";
+  }
+
+  return `<div class="schedule-series">${escapeHtml(parts.join(" • "))}</div>`;
+}
+
 // ---------- data helpers ----------
 
 // Picks the division shown in the sidebar's compact standings snippet.
@@ -785,7 +1116,8 @@ const pageStyles = `
   .empty-state{color:var(--ink-soft); font-family:"IBM Plex Sans",sans-serif; font-size:14px;}
   .util-strip{display:flex; justify-content:space-between; align-items:center; padding:10px 32px; background:var(--ink); color:var(--bg); font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.08em; text-transform:uppercase;}
   .util-strip .dim{color:oklch(0.65 0.01 260); margin-left:16px;}
-  .util-right span{margin-left:20px;}
+  .util-right a{margin-left:20px; color:var(--bg); text-decoration:none;}
+  .util-right a:hover{color:var(--green-soft); text-decoration:underline;}
   .masthead{padding:38px 32px 24px 32px; border-bottom:3px solid var(--ink);}
   .masthead h1{margin:0; font-size:clamp(42px, 7.5vw, 80px); font-weight:600; letter-spacing:-0.01em;}
   .masthead-meta{display:flex; justify-content:space-between; margin-top:16px; font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--ink-soft);}
@@ -794,7 +1126,7 @@ const pageStyles = `
   .lead-column{display:flex; flex-direction:column; gap:32px;}
   .tag{display:inline-block; background:var(--green); color:#fff; font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; padding:4px 10px; margin-bottom:12px;}
   .dateline{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); letter-spacing:.04em; margin-bottom:12px;}
-  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
+  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
   .headline-list{list-style:none; margin:14px 0 0 0; padding:0; display:flex; flex-direction:column;}
   .headline-list li{padding:14px 0; border-bottom:1px solid var(--rule);}
   .headline-list li:first-child{padding-top:0;}
@@ -847,6 +1179,37 @@ const pageStyles = `
   .sublabel{font-family:"IBM Plex Sans",sans-serif; font-size:11.5px; letter-spacing:.08em; font-weight:700; text-transform:uppercase; color:var(--green); display:block;}
   .leaders-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
   .leaders-stack{display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:20px 24px; align-items:start;}
+  .playoff-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .playoff-meta{font-family:"IBM Plex Sans",sans-serif; font-size:12px; letter-spacing:.04em; color:var(--ink-soft); margin-top:8px;}
+  .bracket-grid{display:grid; grid-template-columns:1.3fr 1fr 1.3fr; gap:24px; margin-top:24px; align-items:start;}
+  @media (max-width: 860px){ .bracket-grid{grid-template-columns:1fr;} }
+  .bracket-panel{border:1px solid var(--rule); padding:20px;}
+  .bracket-panel-final{background:var(--green-soft);}
+  .round-label{font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.08em; font-weight:700; text-transform:uppercase; color:var(--green); margin-top:18px; margin-bottom:10px;}
+  .bracket-panel .round-label:first-of-type{margin-top:16px;}
+  .bracket{display:flex; flex-direction:column; gap:10px;}
+  .bracket-matchup{border:1px solid var(--rule); background:var(--bg); padding:10px 12px; display:flex; flex-direction:column; gap:3px;}
+  .bracket-team{display:flex; align-items:center; gap:10px;}
+  .team-logo{width:24px; height:24px; object-fit:contain; flex-shrink:0;}
+  .bracket-team-info{display:flex; flex-direction:column; flex:1; min-width:0;}
+  .bracket-team-name{font-family:"IBM Plex Sans",sans-serif; font-size:13.5px; font-weight:600;}
+  .bracket-team-meta{font-family:"IBM Plex Sans",sans-serif; font-size:11px; color:var(--ink-soft); margin-top:1px;}
+  .bracket-team-empty{font-family:"IBM Plex Sans",sans-serif; font-size:12.5px; color:var(--ink-soft); font-style:italic; padding:2px 0 2px 34px;}
+  .bracket-vs{font-family:"IBM Plex Sans",sans-serif; font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-soft); padding-left:34px;}
+  .hunt-grid{display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-top:32px;}
+  @media (max-width: 700px){ .hunt-grid{grid-template-columns:1fr;} }
+  .hunt-panel table{margin-top:8px;}
+  .schedule-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .schedule-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(300px,1fr)); gap:16px; margin-top:20px;}
+  .schedule-card{border:1px solid var(--rule); padding:16px;}
+  .schedule-time{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:12px;}
+  .schedule-matchup{display:flex; flex-direction:column; gap:10px;}
+  .schedule-team{display:flex; align-items:center; gap:10px;}
+  .schedule-team-info{display:flex; flex-direction:column; min-width:0;}
+  .schedule-team-name{font-family:"IBM Plex Sans",sans-serif; font-size:14px; font-weight:600;}
+  .schedule-pitcher{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); margin-top:2px;}
+  .schedule-at{font-family:"IBM Plex Sans",sans-serif; font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-soft); padding-left:34px;}
+  .schedule-series{margin-top:12px; padding-top:10px; border-top:1px solid var(--rule); font-family:"IBM Plex Sans",sans-serif; font-size:11.5px; color:var(--ink-soft);}
   .opinion-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .opinion-articles{display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:28px; margin-top:20px; align-items:start;}
   .opinion-article{padding:22px; border:1px solid var(--rule); border-radius:6px; background:oklch(0.995 0.003 80); box-shadow:0 1px 2px oklch(0.18 0.012 260 / 0.05);}
