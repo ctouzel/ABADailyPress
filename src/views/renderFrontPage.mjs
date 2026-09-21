@@ -92,6 +92,8 @@ export function renderFrontPageHtml(snapshot, columns, config) {
 
   ${renderProspectsSection(snapshot.prospectHighlight, snapshot.topFarmSystems ?? [])}
 
+  ${renderMilestonesSection(snapshot.playerMilestones ?? [], snapshot.managerHighlightFeature)}
+
 </div>
 </body>
 </html>`;
@@ -158,7 +160,12 @@ function renderNewsSection(headlines) {
 // truncation so it never blows out the headline layout.
 function summarizeHeadline(headline) {
   const title = String(headline?.title ?? "").trim();
-  return summarizeTradeHeadline(title) ?? summarizePlayerOfWeekHeadline(title) ?? truncateHeadline(title);
+  return (
+    summarizeTradeHeadline(title) ??
+    summarizePlayerOfWeekHeadline(title) ??
+    summarizeCycleHeadline(title) ??
+    truncateHeadline(title)
+  );
 }
 
 // "<POS> <Name> of the <Team> honored: Wins the ABA <CONF> Player of the
@@ -175,6 +182,21 @@ function summarizePlayerOfWeekHeadline(title) {
 
   const [, name, team, conference] = match;
   return `${shortenTeamName(team)} ${name} is the ${conference} Player of the Week`;
+}
+
+// "<Team> : <Name> hits for the CYCLE, going 4-5 against the <Team>, ..." is
+// another raw box-score-highlight title OOTP hands us verbatim — condense
+// it to "<Team> <Name> hits for the CYCLE".
+const CYCLE_SENTENCE = /^(.+?)\s*:\s*([A-Z][\w.'-]*(?:\s[A-Z][\w.'-]*)*)\s+hits for the cycle\b/i;
+
+function summarizeCycleHeadline(title) {
+  const match = title.match(CYCLE_SENTENCE);
+  if (!match) {
+    return null;
+  }
+
+  const [, team, player] = match;
+  return `${shortenTeamName(team)} ${player} hits for the CYCLE`;
 }
 
 const TRADE_SENTENCE = /^The (.+?) traded (.+?) to the (.+?)\s*,\s*getting (.+?) in return\.?$/;
@@ -1003,19 +1025,23 @@ function renderScheduleSeries(seriesContext) {
 // ---------- prospect watch (spotlight prospect + farm system rankings) ----------
 
 function renderProspectsSection(prospectHighlight, topFarmSystems) {
-  const panels = [
-    prospectHighlight ? renderProspectHighlight(prospectHighlight) : "",
-    topFarmSystems.length ? renderFarmSystemsPanel(topFarmSystems) : "",
-  ].filter(Boolean);
+  const highlightHtml = prospectHighlight ? renderProspectHighlight(prospectHighlight) : "";
+  const farmHtml = topFarmSystems.length ? renderFarmSystemsPanel(topFarmSystems) : "";
+  const panels = [highlightHtml, farmHtml].filter(Boolean);
 
   if (!panels.length) {
     return "";
   }
 
+  // The farm-system table carries more content per row (team, points, and a
+  // prose list of prospects) than the highlight card, so give it more of
+  // the row when both panels sit side by side instead of splitting 50/50.
+  const columns = highlightHtml && farmHtml ? "minmax(0, 1fr) minmax(0, 1.35fr)" : `repeat(${panels.length}, 1fr)`;
+
   return `
     <section id="prospects" class="prospects-section">
       <div class="label">Prospect Watch</div>
-      <div class="prospects-grid" style="grid-template-columns: repeat(${panels.length}, 1fr);">
+      <div class="prospects-grid" style="grid-template-columns: ${columns};">
         ${panels.join("")}
       </div>
     </section>
@@ -1052,11 +1078,6 @@ function renderProspectHighlight(prospect) {
       }
       ${prospect.acquisitionSummaryLine ? `<p class="prospect-line">${escapeHtml(prospect.acquisitionSummaryLine)}</p>` : ""}
       ${prospect.awardsLine ? `<p class="prospect-line">${escapeHtml(prospect.awardsLine)}</p>` : ""}
-      ${
-        prospect.scoutingSummary?.length
-          ? `<ul class="prospect-scouting-list">${prospect.scoutingSummary.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
-          : ""
-      }
       ${prospect.teamTopProspects?.length ? renderTeamTopProspects(prospect.team, prospect.teamTopProspects) : ""}
     </div>
   `;
@@ -1067,24 +1088,26 @@ function renderProspectHighlight(prospect) {
 // shortenTeamName, which would wrongly chop the last word off of it.
 function renderTeamTopProspects(team, prospects) {
   return `
-    <span class="sublabel">${escapeHtml(team ?? "")} Top Prospects</span>
-    <table class="prospect-team-table">
-      <tr><th>Rk</th><th class="text-left">Player</th><th>Pos</th><th>Age</th><th>Level</th><th class="text-left">Drafted</th></tr>
-      ${prospects
-        .map(
-          (player) => `
-            <tr>
-              <td>${escapeHtml(player.teamRank ?? "")}${player.overallRank ? ` <span class="dim small">(#${escapeHtml(player.overallRank)})</span>` : ""}</td>
-              <td class="text-left">${escapeHtml(player.name ?? "")}</td>
-              <td>${escapeHtml(player.pos ?? "")}</td>
-              <td>${escapeHtml(player.age ?? "")}</td>
-              <td>${escapeHtml(player.level ?? "")}</td>
-              <td class="text-left">${escapeHtml(player.draftYear ? `${player.draftRound} '${String(player.draftYear).slice(-2)}` : "")}</td>
-            </tr>
-          `,
-        )
-        .join("")}
-    </table>
+    <div class="prospect-team-block">
+      <span class="sublabel">${escapeHtml(team ?? "")} Top Prospects</span>
+      <table class="prospect-team-table">
+        <tr><th>Rk</th><th class="text-left">Player</th><th>Pos</th><th>Age</th><th>Level</th><th class="text-left">Drafted</th></tr>
+        ${prospects
+          .map(
+            (player) => `
+              <tr>
+                <td>${escapeHtml(player.teamRank ?? "")}${player.overallRank ? ` <span class="dim small">(#${escapeHtml(player.overallRank)})</span>` : ""}</td>
+                <td class="text-left">${escapeHtml(player.name ?? "")}</td>
+                <td>${escapeHtml(player.pos ?? "")}</td>
+                <td>${escapeHtml(player.age ?? "")}</td>
+                <td>${escapeHtml(player.level ?? "")}</td>
+                <td class="text-left">${escapeHtml(player.draftYear ? `${player.draftRound} '${String(player.draftYear).slice(-2)}` : "")}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </div>
   `;
 }
 
@@ -1122,6 +1145,100 @@ function renderFarmSystemsPanel(teams) {
           )
           .join("")}
       </table>
+    </div>
+  `;
+}
+
+function renderMilestonesSection(playerMilestones, managerHighlight) {
+  const milestonesHtml = playerMilestones.length ? renderPlayerMilestonesPanel(playerMilestones) : "";
+  const coachHtml = managerHighlight ? renderCoachHighlightPanel(managerHighlight) : "";
+  const panels = [milestonesHtml, coachHtml].filter(Boolean);
+
+  if (!panels.length) {
+    return "";
+  }
+
+  return `
+    <section id="milestones" class="milestones-section">
+      <div class="label">Milestones &amp; Coaching</div>
+      <div class="milestones-grid" style="grid-template-columns: repeat(${panels.length}, 1fr);">
+        ${panels.join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderPlayerMilestonesPanel(milestones) {
+  return `
+    <div class="prospect-panel">
+      <div class="conf-label">Player Milestones</div>
+      <ul class="milestone-list">
+        ${milestones
+          .map(
+            (milestone) => `
+              <li class="milestone-item">
+                <span class="milestone-date">${escapeHtml(formatMilestoneDate(milestone.date))}</span>
+                <span class="milestone-body"><strong>${escapeHtml(milestone.player ?? "")}</strong> reaches ${escapeHtml(milestone.accomplishment ?? "")}</span>
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    </div>
+  `;
+}
+
+// OOTP milestone dates look like "06/10/2034" (MM/DD/YYYY) — a different
+// shape than the "Tuesday, June 6th , 2034" strings elsewhere in the export
+// — so this gets its own compact "Jun 10" formatter instead of reusing
+// formatWireDate.
+const MONTH_ABBREVIATIONS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function formatMilestoneDate(dateStr) {
+  const match = String(dateStr ?? "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!match) {
+    return String(dateStr ?? "");
+  }
+  const [, month, day] = match;
+  const label = MONTH_ABBREVIATIONS[Number(month) - 1];
+  return label ? `${label} ${Number(day)}` : String(dateStr);
+}
+
+function renderCoachHighlightPanel(manager) {
+  const stats = [
+    manager.careerRecord ? ["Record", manager.careerRecord] : null,
+    manager.careerSeasons ? ["Seasons", manager.careerSeasons] : null,
+    manager.playoffAppearances != null ? ["Playoffs", manager.playoffAppearances] : null,
+    manager.championships != null ? ["Titles", manager.championships] : null,
+  ].filter(Boolean);
+
+  return `
+    <div class="prospect-panel">
+      <div class="conf-label">Coach Highlight</div>
+      <div class="prospect-card">
+        <img class="prospect-photo" src="${escapeHtml(logoRelativePath(manager.imageUrl))}" alt="" loading="lazy" onerror="this.remove()">
+        <div class="prospect-info">
+          <div class="prospect-name">${escapeHtml(manager.name ?? "")}</div>
+          <div class="prospect-meta">${escapeHtml(
+            [manager.role, manager.teamName, manager.age ? `Age ${manager.age}` : ""].filter(Boolean).join(" • "),
+          )}</div>
+        </div>
+      </div>
+      ${
+        stats.length
+          ? `
+            <span class="sublabel">Career</span>
+            <div class="prospect-stats">
+              ${stats.map(([label, value]) => `<div class="prospect-stat"><span class="stat-value">${escapeHtml(value)}</span><span class="stat-label">${escapeHtml(label)}</span></div>`).join("")}
+            </div>
+          `
+          : ""
+      }
+      ${
+        manager.summary?.length
+          ? manager.summary.map((line) => `<p class="prospect-line">${escapeHtml(line)}</p>`).join("")
+          : ""
+      }
     </div>
   `;
 }
@@ -1270,7 +1387,7 @@ const pageStyles = `
   .lead-column{display:flex; flex-direction:column; gap:32px;}
   .tag{display:inline-block; background:var(--green); color:#fff; font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; padding:4px 10px; margin-bottom:12px;}
   .dateline{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); letter-spacing:.04em; margin-bottom:12px;}
-  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
+  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
   .headline-list{list-style:none; margin:14px 0 0 0; padding:0; display:flex; flex-direction:column;}
   .headline-list li{padding:14px 0; border-bottom:1px solid var(--rule);}
   .headline-list li:first-child{padding-top:0;}
@@ -1357,24 +1474,31 @@ const pageStyles = `
   .prospects-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .prospects-grid{display:grid; gap:32px; margin-top:20px; align-items:start;}
   @media (max-width: 860px){ .prospects-grid{grid-template-columns:1fr !important;} }
-  .prospect-card{display:flex; align-items:center; gap:14px; margin-top:16px;}
-  .prospect-photo{width:64px; height:64px; object-fit:cover; border-radius:4px; border:1px solid var(--rule); flex-shrink:0; background:var(--green-soft);}
+  .prospect-card{display:flex; align-items:center; gap:12px; margin-top:14px;}
+  .prospect-photo{width:56px; height:56px; object-fit:cover; border-radius:4px; border:1px solid var(--rule); flex-shrink:0; background:var(--green-soft);}
   .prospect-info{display:flex; flex-direction:column; gap:3px; min-width:0;}
-  .prospect-name{font-family:"Newsreader",serif; font-size:20px; font-weight:600; line-height:1.2;}
+  .prospect-name{font-family:"Newsreader",serif; font-size:19px; font-weight:600; line-height:1.2;}
   .prospect-meta{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft);}
   .prospect-rank{font-family:"IBM Plex Sans",sans-serif; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--green); margin-top:2px;}
-  .prospect-stats{display:grid; grid-template-columns:repeat(auto-fit, minmax(54px,1fr)); gap:10px; margin-top:10px; padding:12px; background:var(--green-soft);}
-  .prospect-stat{display:flex; flex-direction:column; align-items:center; text-align:center;}
-  .stat-value{font-family:"Newsreader",serif; font-size:16px; font-weight:600;}
-  .stat-label{font-family:"IBM Plex Sans",sans-serif; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); margin-top:2px;}
+  .prospect-stats{display:flex; flex-wrap:nowrap; align-items:baseline; gap:16px; margin-top:10px; padding:9px 14px; background:var(--green-soft); overflow-x:auto;}
+  .prospect-stat{display:flex; flex-direction:row; align-items:baseline; gap:4px; flex-shrink:0; white-space:nowrap;}
+  .stat-value{font-family:"Newsreader",serif; font-size:14px; font-weight:600;}
+  .stat-label{font-family:"IBM Plex Sans",sans-serif; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft);}
   .prospect-line{font-family:"IBM Plex Sans",sans-serif; font-size:12.5px; color:var(--ink-soft); margin:10px 0 0 0;}
-  .prospect-scouting-list{margin:10px 0 0 0; padding-left:18px; font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); line-height:1.5;}
-  .prospect-scouting-list li{margin-bottom:4px;}
-  .prospect-team-table{margin-top:16px;}
+  .prospect-team-block{margin-top:20px; padding-top:16px; border-top:1px solid var(--rule);}
+  .prospect-team-table{margin-top:10px;}
   .farm-table{margin-top:16px;}
   .text-left{text-align:left !important;}
   .farm-team{display:flex; align-items:center; gap:8px;}
   .farm-prospects{white-space:normal; color:var(--ink-soft); font-size:11.5px; line-height:1.5;}
+  .milestones-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .milestones-grid{display:grid; gap:32px; margin-top:20px; align-items:start;}
+  @media (max-width: 860px){ .milestones-grid{grid-template-columns:1fr !important;} }
+  .milestone-list{margin-top:16px; display:flex; flex-direction:column; gap:14px;}
+  .milestone-item{display:flex; gap:12px; align-items:baseline; padding-bottom:14px; border-bottom:1px solid var(--rule);}
+  .milestone-item:last-child{border-bottom:none; padding-bottom:0;}
+  .milestone-date{font-family:"IBM Plex Sans",sans-serif; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--green); flex-shrink:0; width:52px;}
+  .milestone-body{font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--ink); line-height:1.5;}
   .opinion-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .opinion-articles{display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:28px; margin-top:20px; align-items:start;}
   .opinion-article{padding:22px; border:1px solid var(--rule); border-radius:6px; background:oklch(0.995 0.003 80); box-shadow:0 1px 2px oklch(0.18 0.012 260 / 0.05);}
