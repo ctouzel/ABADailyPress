@@ -94,6 +94,8 @@ export function renderFrontPageHtml(snapshot, columns, config) {
 
   ${renderMilestonesSection(snapshot.playerMilestones ?? [], snapshot.managerHighlightFeature)}
 
+  ${renderMinorLeaguesSection([snapshot.frontierLeague])}
+
 </div>
 </body>
 </html>`;
@@ -164,15 +166,19 @@ function summarizeHeadline(headline) {
     summarizeTradeHeadline(title) ??
     summarizePlayerOfWeekHeadline(title) ??
     summarizeCycleHeadline(title) ??
+    summarizeHittingStreakEndHeadline(title) ??
     truncateHeadline(title)
   );
 }
 
 // "<POS> <Name> of the <Team> honored: Wins the ABA <CONF> Player of the
 // Week Award." is another raw sentence OOTP hands us verbatim as a title —
-// condense it to "<Team> <Name> is the <CONF> Player of the Week".
+// condense it to "<Team> <Name> is the <CONF> Player of the Week". The
+// league code varies (ABA for the majors, FL for the Frontier League,
+// and whatever a future minor league uses), so it's matched generically
+// rather than hardcoded to "ABA".
 const PLAYER_OF_WEEK_SENTENCE =
-  /^[A-Z0-9]{1,3}\s+([A-Z][\w.'-]*(?:\s[A-Z][\w.'-]*)*)\s+of the (.+?) honored: Wins the ABA (\w+) Player of the Week Award\.?$/;
+  /^[A-Z0-9]{1,3}\s+([A-Z][\w.'-]*(?:\s[A-Z][\w.'-]*)*)\s+of the (.+?) honored: Wins the [A-Z]{2,4} (\w+) Player of the Week Award\.?$/;
 
 function summarizePlayerOfWeekHeadline(title) {
   const match = title.match(PLAYER_OF_WEEK_SENTENCE);
@@ -197,6 +203,23 @@ function summarizeCycleHeadline(title) {
 
   const [, team, player] = match;
   return `${shortenTeamName(team)} ${player} hits for the CYCLE`;
+}
+
+// "<Team> : <Name> goes 0-3 against the <Team> , ending his hitting
+// streak..." is another raw box-score-highlight title OOTP hands us
+// verbatim — condense it to "<Team> <Name> goes 0-3 against <Team>, ending
+// his hitting streak".
+const HITTING_STREAK_END_SENTENCE =
+  /^(.+?)\s*:\s*([A-Z][\w.'-]*(?:\s[A-Z][\w.'-]*)*)\s+goes\s+(\d+-\d+)\s+against the\s+(.+?)\s*,\s*ending his hitting streak\b/i;
+
+function summarizeHittingStreakEndHeadline(title) {
+  const match = title.match(HITTING_STREAK_END_SENTENCE);
+  if (!match) {
+    return null;
+  }
+
+  const [, team, player, record, opponent] = match;
+  return `${shortenTeamName(team)} ${player} goes ${record} against ${shortenTeamName(opponent)}, ending his hitting streak`;
 }
 
 const TRADE_SENTENCE = /^The (.+?) traded (.+?) to the (.+?)\s*,\s*getting (.+?) in return\.?$/;
@@ -1033,10 +1056,10 @@ function renderProspectsSection(prospectHighlight, topFarmSystems) {
     return "";
   }
 
-  // The farm-system table carries more content per row (team, points, and a
-  // prose list of prospects) than the highlight card, so give it more of
-  // the row when both panels sit side by side instead of splitting 50/50.
-  const columns = highlightHtml && farmHtml ? "minmax(0, 1fr) minmax(0, 1.35fr)" : `repeat(${panels.length}, 1fr)`;
+  // The highlight card needs enough width to keep its stat line on one row
+  // without scrolling, so give it the larger share when both panels sit
+  // side by side instead of splitting 50/50 (or favoring the farm table).
+  const columns = highlightHtml && farmHtml ? "minmax(0, 1.3fr) minmax(0, 1fr)" : `repeat(${panels.length}, 1fr)`;
 
   return `
     <section id="prospects" class="prospects-section">
@@ -1049,7 +1072,12 @@ function renderProspectsSection(prospectHighlight, topFarmSystems) {
 }
 
 function renderProspectHighlight(prospect) {
-  const stats = filteredStatEntries(prospect.currentLine);
+  // Trim to the leading stats and drop the trailing two (the most advanced/
+  // niche ones, since currentLine's key order runs basic counting stats
+  // first and rate/sabermetric stats last) so the strip fits on one line
+  // without a horizontal scrollbar.
+  const allStats = filteredStatEntries(prospect.currentLine);
+  const stats = allStats.slice(0, Math.max(0, allStats.length - 2));
 
   return `
     <div class="prospect-panel">
@@ -1243,6 +1271,182 @@ function renderCoachHighlightPanel(manager) {
   `;
 }
 
+// ---------- minor leagues (concise: news + standings + leaders, no scores) ----------
+
+// Only the Frontier League is modeled by the data pipeline today. Next
+// season a second minor league (an AA level) is being added to the OOTP
+// export — once the pipeline exposes it as its own snapshot field, add it
+// to this array in the caller below. renderMinorLeaguesSection and
+// renderMinorLeaguePanel are written generically against the same
+// { leagueName, headlines, standingsSections, battingLeaderboards,
+// pitchingLeaderboards } shape as frontierLeague, so no other changes are
+// needed to bring a second league online — it'll render as another panel
+// stacked under this section automatically.
+function renderMinorLeaguesSection(minorLeagues) {
+  const leagues = minorLeagues.filter(
+    (league) =>
+      league &&
+      ((league.headlines ?? []).length ||
+        (league.standingsSections ?? []).length ||
+        (league.battingLeaderboards ?? []).length ||
+        (league.pitchingLeaderboards ?? []).length),
+  );
+
+  if (!leagues.length) {
+    return "";
+  }
+
+  return `
+    <section id="minor-leagues" class="minor-leagues-section">
+      <div class="label">Minor League Report</div>
+      <div class="minor-leagues-stack">
+        ${leagues.map(renderMinorLeaguePanel).join("")}
+      </div>
+    </section>
+  `;
+}
+
+// Deliberately lighter than the majors' News/Pennant Races/Leaders
+// sections — a handful of headlines, division standings only (no
+// wildcard tables, which mostly repeat the same teams), and two
+// leaderboard categories a side — so the minor-league report reads as a
+// glance, not a second front page. No scores, per the brief.
+function renderMinorLeaguePanel(league) {
+  return `
+    <div class="minor-league-panel">
+      <div class="conf-label">${escapeHtml(league.leagueName ?? "Minor League")}</div>
+      ${renderMinorLeagueNews(league.headlines ?? [])}
+      ${renderMinorLeagueStandings(league.standingsSections ?? [])}
+      ${renderMinorLeagueLeaders(league.battingLeaderboards ?? [], league.pitchingLeaderboards ?? [])}
+    </div>
+  `;
+}
+
+function renderMinorLeagueNews(headlines) {
+  const items = dedupeHeadlines(headlines).slice(0, 3);
+  if (!items.length) {
+    return "";
+  }
+
+  return `
+    <div class="minor-league-block">
+      <span class="sublabel">Latest News</span>
+      <ul class="minor-news-list">
+        ${items
+          .map(
+            (headline) => `
+              <li>
+                <span class="minor-news-title">${escapeHtml(summarizeHeadline(headline))}</span>
+                ${headline.date ? `<span class="dim small">${escapeHtml(headline.date)}</span>` : ""}
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    </div>
+  `;
+}
+
+function renderMinorLeagueStandings(sections) {
+  const divisions = sections.filter((section) => section.kind === "division");
+  if (!divisions.length) {
+    return "";
+  }
+
+  const byConference = groupByConference(divisions);
+  const conferenceKeys = Object.keys(byConference);
+
+  return `
+    <div class="minor-league-block">
+      <span class="sublabel">Standings</span>
+      <div class="minor-standings-grid" style="grid-template-columns: repeat(${conferenceKeys.length || 1}, 1fr);">
+        ${conferenceKeys
+          .map(
+            (key) => `
+              <div class="minor-standings-column">
+                ${byConference[key].map(renderMinorStandingsTable).join("")}
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderMinorStandingsTable(section) {
+  return `
+    <div>
+      <span class="sublabel minor-sublabel">${escapeHtml(titleCase(section.label))}</span>
+      <table class="compact-table">
+        <tr><th>Team</th><th>W</th><th>L</th><th>GB</th></tr>
+        ${section.rows
+          .map(
+            (row) => `
+              <tr>
+                <td>${escapeHtml(shortenTeamName(row.Team))}</td>
+                <td>${escapeHtml(row.W)}</td>
+                <td>${escapeHtml(row.L)}</td>
+                <td>${escapeHtml(row.GB)}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </div>
+  `;
+}
+
+function renderMinorLeagueLeaders(battingLeaderboards, pitchingLeaderboards) {
+  const groups = [
+    { title: "Batting", boards: battingLeaderboards.slice(0, 2) },
+    { title: "Pitching", boards: pitchingLeaderboards.slice(0, 2) },
+  ].filter((group) => group.boards.length);
+
+  if (!groups.length) {
+    return "";
+  }
+
+  return `
+    <div class="minor-league-block">
+      <span class="sublabel">Leaders</span>
+      <div class="minor-leaders-grid">
+        ${groups
+          .map(
+            (group) => `
+              <div>
+                <div class="minor-leaders-title">${escapeHtml(group.title)}</div>
+                ${group.boards.map(renderMinorLeaderboardTable).join("")}
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderMinorLeaderboardTable(leaderboard) {
+  return `
+    <div>
+      <span class="sublabel minor-sublabel">${escapeHtml(leaderboard.label)}</span>
+      <table class="compact-table">
+        ${leaderboard.entries
+          .slice(0, 3)
+          .map(
+            (entry) => `
+              <tr>
+                <td>${escapeHtml(entry.player)} &bull; ${escapeHtml(teamCode(entry.team))}</td>
+                <td class="value">${escapeHtml(entry.value)}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </div>
+  `;
+}
+
 // ---------- data helpers ----------
 
 // Picks the division shown in the sidebar's compact standings snippet.
@@ -1311,7 +1515,14 @@ function groupByConference(sections) {
 // enough to strip them) — e.g. "Toledo Mud Hens" should shorten to
 // "Toledo", not "Toledo Mud". Extend this list if the league gains another
 // team with a multi-word nickname.
-const MULTI_WORD_NICKNAMES = ["Sea Dogs", "Red Wings", "River Cats", "Mud Hens"];
+const MULTI_WORD_NICKNAMES = [
+  "Sea Dogs",
+  "Red Wings",
+  "River Cats",
+  "Mud Hens",
+  "Yard Goats",
+  "Iron Pigs",
+];
 
 function shortenTeamName(fullName) {
   const name = String(fullName ?? "").trim();
@@ -1387,7 +1598,7 @@ const pageStyles = `
   .lead-column{display:flex; flex-direction:column; gap:32px;}
   .tag{display:inline-block; background:var(--green); color:#fff; font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; padding:4px 10px; margin-bottom:12px;}
   .dateline{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); letter-spacing:.04em; margin-bottom:12px;}
-  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
+  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label, .minor-leagues-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
   .headline-list{list-style:none; margin:14px 0 0 0; padding:0; display:flex; flex-direction:column;}
   .headline-list li{padding:14px 0; border-bottom:1px solid var(--rule);}
   .headline-list li:first-child{padding-top:0;}
@@ -1499,6 +1710,21 @@ const pageStyles = `
   .milestone-item:last-child{border-bottom:none; padding-bottom:0;}
   .milestone-date{font-family:"IBM Plex Sans",sans-serif; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--green); flex-shrink:0; width:52px;}
   .milestone-body{font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--ink); line-height:1.5;}
+  .minor-leagues-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .minor-leagues-stack{display:flex; flex-direction:column; gap:28px; margin-top:20px;}
+  .minor-league-panel{display:flex; flex-direction:column; gap:18px;}
+  .minor-news-list{list-style:none; margin:10px 0 0 0; padding:0; display:flex; flex-direction:column;}
+  .minor-news-list li{display:flex; justify-content:space-between; align-items:baseline; gap:16px; padding:7px 0; border-bottom:1px solid var(--rule); font-family:"IBM Plex Sans",sans-serif; font-size:12.5px;}
+  .minor-news-list li:last-child{border-bottom:none; padding-bottom:0;}
+  .minor-news-title{color:var(--ink);}
+  .minor-standings-grid{display:grid; gap:20px; margin-top:8px;}
+  @media (max-width: 700px){ .minor-standings-grid{grid-template-columns:1fr !important;} }
+  .minor-standings-column{display:flex; flex-direction:column; gap:12px;}
+  .minor-leaders-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(170px,1fr)); gap:12px 20px; margin-top:8px;}
+  .minor-leaders-title{font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.06em; font-weight:700; text-transform:uppercase; color:var(--ink-soft); margin-bottom:6px;}
+  .minor-sublabel{font-size:10px;}
+  .compact-table{margin-top:4px;}
+  .compact-table td, .compact-table th{padding:3px 5px; font-size:11px;}
   .opinion-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .opinion-articles{display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:28px; margin-top:20px; align-items:start;}
   .opinion-article{padding:22px; border:1px solid var(--rule); border-radius:6px; background:oklch(0.995 0.003 80); box-shadow:0 1px 2px oklch(0.18 0.012 260 / 0.05);}
