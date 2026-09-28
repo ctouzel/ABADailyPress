@@ -4266,7 +4266,7 @@ function formatProspectHighlightDate(value) {
 
 function findTeamStandingsContext(teamName, standingsSections) {
   for (const section of standingsSections ?? []) {
-    for (const row of section.rows ?? []) {
+    for (const [index, row] of (section.rows ?? []).entries()) {
       if (buildTeamLookupKeys(row.Team).some((key) => buildTeamLookupKeys(teamName).includes(key))) {
         return {
           sectionLabel: section.label,
@@ -4277,6 +4277,9 @@ function findTeamStandingsContext(teamName, standingsSections) {
           l10: String(row.L10 ?? "").trim(),
           streak: String(row.Strk ?? "").trim(),
           magicNumber: String(row["M#"] ?? "").trim(),
+          // The standings table lists each division in finish order, so the
+          // row's position there is the team's place within its division.
+          place: index + 1,
         };
       }
     }

@@ -21,6 +21,21 @@ export function buildColumns(snapshot, config, previousState = {}) {
   return columns;
 }
 
+// Rebuilds just one columnist's piece with the original rules engine. Used
+// as a per-columnist fallback by the AI column factory (see
+// aiColumnFactory.mjs) when a live model call for that columnist fails —
+// wraps the internal dispatcher with the same currentSnapshotRef
+// set/clear that buildColumns does, since a few deep helpers (player-name
+// resolution) read that module-level ref instead of a passed parameter.
+export function buildSingleColumn(snapshot, columnist, previousColumn, usedTargets = new Set()) {
+  currentSnapshotRef = snapshot;
+  try {
+    return buildColumn(snapshot, columnist, 0, { [columnist.name]: previousColumn }, usedTargets);
+  } finally {
+    currentSnapshotRef = null;
+  }
+}
+
 function buildColumn(snapshot, columnist, index, previousState, usedTargets) {
   if (columnist.name === "Mack Dalton") {
     return buildMackDaltonColumn(snapshot, columnist, previousState[columnist.name], usedTargets);

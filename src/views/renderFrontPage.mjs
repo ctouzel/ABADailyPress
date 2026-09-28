@@ -6,22 +6,22 @@
 //
 // Design: quick overview above the fold (hero + secondary stories, a
 // sidebar with Three Stars / a featured-division standings snippet with a
-// jump link / a batting-average leaders snippet), then Opinion Desk and
-// last night's scores at the same snippet depth, then the full "Pennant
-// Races" section further down the page with every standings table, then
-// an injuries/transactions footer ticker.
+// jump link / a batting-average leaders snippet), then last night's scores
+// at the same overview depth, then the full "Pennant Races" section further
+// down the page with every standings table, then Matt Gropius's Hot Takes
+// column, then an injuries/transactions footer ticker.
 //
 // Sections not yet designed (career leaders, the playoff bracket,
 // financial data, manager/prospect features, the Frontier League mirror,
 // etc.) are intentionally left out for now rather than guessed at — see
 // the project notes for what's still open.
 
-export function renderFrontPageHtml(snapshot, columns, config) {
+export function renderFrontPageHtml(snapshot, columns, config, interview) {
   const newspaperName = config?.newspaperName ?? "The ABA Daily Press";
   const leagueName = config?.leagueName ?? "American Baseball League";
   const city = config?.city ?? "Grand Harbor";
 
-  const featuredHeadlines = dedupeHeadlines(snapshot.headlines ?? []).slice(0, 6);
+  const featuredHeadlines = sortHeadlines(dedupeHeadlines(snapshot.headlines ?? [])).slice(0, 6);
   const mastheadDateLabel = withLeagueYear(snapshot.leagueDateLabel, snapshot);
 
   const featured = pickFeaturedDivision(snapshot.standingsSections ?? [], snapshot.leagueDateLabel);
@@ -49,7 +49,7 @@ export function renderFrontPageHtml(snapshot, columns, config) {
       <span class="dim">${escapeHtml(leagueName)}</span>
     </div>
     <div class="util-right">
-      <a href="#news-section">News</a><a href="#opinion-section">Opinion</a><a href="#pennant-races">Standings</a><a href="#leaders-section">Leaders</a><a href="#schedule">Schedule</a>
+      <a href="#news-section">News</a><a href="#opinion-section">Hot Takes</a><a href="#pennant-races">Standings</a><a href="#leaders-section">Leaders</a><a href="#schedule">Schedule</a>
     </div>
   </div>
 
@@ -70,7 +70,6 @@ export function renderFrontPageHtml(snapshot, columns, config) {
       ${renderThreeStars(snapshot.threeStarsOfDay ?? [])}
       ${featured ? renderStandingsSnippet(featured) : ""}
       ${featuredLeaderboard ? renderLeadersSnippet(featuredLeaderboard) : ""}
-      ${renderOpinionSnippet(columns ?? [])}
     </aside>
   </div>
 
@@ -93,6 +92,10 @@ export function renderFrontPageHtml(snapshot, columns, config) {
   ${renderProspectsSection(snapshot.prospectHighlight, snapshot.topFarmSystems ?? [])}
 
   ${renderMilestonesSection(snapshot.playerMilestones ?? [], snapshot.managerHighlightFeature)}
+
+  ${renderPlayerInterviewSection(snapshot.playerInterviewFeature, interview)}
+
+  ${renderTeamHighlightSection(snapshot.playerInterviewFeature?.teamHighlight)}
 
   ${renderMinorLeaguesSection([snapshot.frontierLeague])}
 
@@ -380,6 +383,94 @@ function dedupeHeadlines(headlines) {
   });
 }
 
+// Headlines are shown newest-day-first, and within a day by a rough
+// editorial priority: top-of-the-wire feats (no-hitters, perfect games,
+// championships) lead, then critical injuries / incredible feats / real
+// trades, then Player of the Week honors, then everything else, then trade
+// rumors, with weekly power rankings and stat dumps always last — those
+// are reference filler, not news.
+const HEADLINE_PRIORITY = {
+  TOP: 0,
+  HIGH: 1,
+  MEDIUM: 2,
+  DEFAULT: 3,
+  LOW: 4,
+  LAST: 5,
+};
+
+function classifyHeadlinePriority(headline) {
+  const title = String(headline?.title ?? "");
+  const text = `${headline?.title ?? ""} ${headline?.summary ?? ""} ${headline?.fullText ?? ""}`.toLowerCase();
+
+  // Always last — weekly filler, not news.
+  if (/power rankings|bnn stats/.test(text)) {
+    return HEADLINE_PRIORITY.LAST;
+  }
+
+  // Top priority — no-hitters, perfect games, championships.
+  if (/no-hitter|no hitter|perfect game|champion/.test(text)) {
+    return HEADLINE_PRIORITY.TOP;
+  }
+
+  // High priority — a critical (season/career) injury, an incredible feat,
+  // or a completed trade (as opposed to a rumor).
+  const isCriticalInjury = /injur|surger/.test(text) && /season|career|out for the year|tommy john/.test(text);
+  const isIncredibleFeat =
+    CYCLE_SENTENCE.test(title) || /grand slam|walk-?off|franchise record|league record|club record|immaculate inning/.test(text);
+  const isRealTrade = TRADE_SENTENCE.test(title);
+  if (isCriticalInjury || isIncredibleFeat || isRealTrade) {
+    return HEADLINE_PRIORITY.HIGH;
+  }
+
+  // Medium priority — Player of the Week honors.
+  if (/player of the week/.test(text)) {
+    return HEADLINE_PRIORITY.MEDIUM;
+  }
+
+  // Low priority — trade rumors/speculation (a real trade was already
+  // caught above, so anything trade-flavored left here is just talk).
+  if (/rumor|rumour|trade block|shopping|linked to a trade|could be traded/.test(text)) {
+    return HEADLINE_PRIORITY.LOW;
+  }
+
+  return HEADLINE_PRIORITY.DEFAULT;
+}
+
+// OOTP date labels look like "Monday, June 12th , 2034" — pull out a
+// sortable UTC timestamp so headlines from a later day always lead.
+function parseHeadlineDate(dateLabel) {
+  const match = String(dateLabel ?? "").match(/([A-Za-z]+)\s+(\d+)\D*(\d{4})/);
+  if (!match) {
+    return null;
+  }
+
+  const [, monthName, day, year] = match;
+  const monthIndex = MONTH_ABBREVIATIONS.findIndex(
+    (abbreviation) => abbreviation.toLowerCase() === monthName.slice(0, 3).toLowerCase(),
+  );
+  if (monthIndex === -1) {
+    return null;
+  }
+
+  return Date.UTC(Number(year), monthIndex, Number(day));
+}
+
+// Newest day first; within the same day, most important first. A headline
+// with an unparseable date sorts after every dated one rather than
+// crashing the comparison.
+function sortHeadlines(headlines) {
+  return [...headlines].sort((a, b) => {
+    const dateA = parseHeadlineDate(a.date);
+    const dateB = parseHeadlineDate(b.date);
+    if (dateA !== dateB) {
+      if (dateA == null) return 1;
+      if (dateB == null) return -1;
+      return dateB - dateA;
+    }
+    return classifyHeadlinePriority(a) - classifyHeadlinePriority(b);
+  });
+}
+
 // ---------- sidebar ----------
 
 function renderThreeStars(stars) {
@@ -459,36 +550,14 @@ function renderLeadersSnippet(leaderboard) {
   `;
 }
 
-// ---------- opinion desk (snippet above the fold + full Opinion section) ----------
-
-function renderOpinionSnippet(columns) {
-  if (!columns.length) {
-    return "";
-  }
-
-  return `
-    <div class="sidebar-block opinion-snippet">
-      <div class="label">Opinion Desk</div>
-      <ul class="opinion-headline-list">
-        ${columns
-          .map(
-            (column, index) => `
-              <li>
-                <a class="opinion-headline-link" href="#opinion-${index}">${escapeHtml(stripColumnistName(column.headline, column.author))}</a>
-                <div class="byline">${escapeHtml(column.author)}</div>
-              </li>
-            `,
-          )
-          .join("")}
-      </ul>
-      <a class="jump-link" href="#opinion-section">Read full columns &darr;</a>
-    </div>
-  `;
-}
-
-// Full-length columns, laid out as a card grid (one card per columnist)
-// rather than a stacked list — the format modern sports sites (ESPN, The
-// Athletic) use for an opinion/writers section.
+// ---------- Matt Gropius Hot Takes ----------
+//
+// Formerly a multi-columnist "Opinion Desk" (Mack Dalton / Darren Kline /
+// Matt Gropius) with its own above-the-fold snippet + jump link in the
+// sidebar. Both other columnists are now inactive (config.mjs), leaving
+// Matt Gropius as the section's sole voice, so the sidebar snippet was
+// dropped and this full section restyled to read like a single feature
+// article rather than a card grid — see the .opinion-article CSS below.
 function renderOpinionSection(columns) {
   if (!columns.length) {
     return "";
@@ -496,7 +565,7 @@ function renderOpinionSection(columns) {
 
   return `
     <section id="opinion-section" class="opinion-section">
-      <div class="label">Opinion Desk</div>
+      <div class="label">Matt Gropius Hot Takes</div>
       <div class="opinion-articles">
         ${columns
           .map(
@@ -1071,13 +1140,18 @@ function renderProspectsSection(prospectHighlight, topFarmSystems) {
   `;
 }
 
+// Real player stat tables can run 12-20+ columns, so trimming a couple off
+// the end (the old approach) still left far too many to fit on one line.
+// Cap at a fixed count instead — currentLine's key order runs basic
+// counting stats first and rate/sabermetric stats last, so keeping only
+// the leading ones keeps the most meaningful stats and guarantees the
+// strip fits without a horizontal scrollbar regardless of how many
+// columns the source table actually had.
+const MAX_PROSPECT_STATS = 5;
+
 function renderProspectHighlight(prospect) {
-  // Trim to the leading stats and drop the trailing two (the most advanced/
-  // niche ones, since currentLine's key order runs basic counting stats
-  // first and rate/sabermetric stats last) so the strip fits on one line
-  // without a horizontal scrollbar.
   const allStats = filteredStatEntries(prospect.currentLine);
-  const stats = allStats.slice(0, Math.max(0, allStats.length - 2));
+  const stats = allStats.slice(0, MAX_PROSPECT_STATS);
 
   return `
     <div class="prospect-panel">
@@ -1234,7 +1308,12 @@ function formatMilestoneDate(dateStr) {
 
 function renderCoachHighlightPanel(manager) {
   const stats = [
-    manager.careerRecord ? ["Record", manager.careerRecord] : null,
+    // "Team Record", not "Record" — this is the club's overall W-L across
+    // the seasons this staffer was on staff (summed straight from their
+    // career-history table), not necessarily games they personally
+    // managed, since the panel can highlight any staff role (Manager,
+    // Bench/Hitting/Pitching Coach), not just Managers.
+    manager.careerRecord ? ["Team Record", manager.careerRecord] : null,
     manager.careerSeasons ? ["Seasons", manager.careerSeasons] : null,
     manager.playoffAppearances != null ? ["Playoffs", manager.playoffAppearances] : null,
     manager.championships != null ? ["Titles", manager.championships] : null,
@@ -1267,6 +1346,150 @@ function renderCoachHighlightPanel(manager) {
           ? manager.summary.map((line) => `<p class="prospect-line">${escapeHtml(line)}</p>`).join("")
           : ""
       }
+    </div>
+  `;
+}
+
+// ---------- player interview (one-on-one Q&A; who gets picked is decided
+// entirely by snapshotBuilder.mjs's buildPlayerInterviewFeature — this only
+// renders whatever content aiInterviewFactory.mjs wrote for that player) ----------
+
+function renderPlayerInterviewSection(feature, interview) {
+  if (!feature || !interview?.questions?.length) {
+    return "";
+  }
+
+  const stats = filteredStatEntries(feature.currentLine).slice(0, 4);
+
+  return `
+    <section id="player-interview" class="interview-section">
+      <div class="label">One-on-One</div>
+      <div class="interview-layout">
+        <div class="prospect-panel">
+          <div class="conf-label">Sit-Down</div>
+          <div class="prospect-card">
+            <img class="prospect-photo" src="${escapeHtml(logoRelativePath(feature.imageUrl))}" alt="" loading="lazy" onerror="this.remove()">
+            <div class="prospect-info">
+              <div class="prospect-name">${escapeHtml(feature.displayName ?? feature.name ?? "")}</div>
+              <div class="prospect-meta">${escapeHtml(
+                [feature.pos, feature.teamFullName || feature.team, feature.age ? `Age ${feature.age}` : ""]
+                  .filter(Boolean)
+                  .join(" • "),
+              )}</div>
+            </div>
+          </div>
+          ${
+            stats.length
+              ? `
+                <span class="sublabel">This Season</span>
+                <div class="prospect-stats">
+                  ${stats.map(([label, value]) => `<div class="prospect-stat"><span class="stat-value">${escapeHtml(value)}</span><span class="stat-label">${escapeHtml(label)}</span></div>`).join("")}
+                </div>
+              `
+              : ""
+          }
+          ${feature.careerSummaryLine ? `<p class="prospect-line">${escapeHtml(feature.careerSummaryLine)}</p>` : ""}
+          ${feature.careerDetailLine ? `<p class="prospect-line">${escapeHtml(feature.careerDetailLine)}</p>` : ""}
+        </div>
+        <div class="interview-transcript">
+          ${interview.headline ? `<h3 class="interview-headline">${escapeHtml(interview.headline)}</h3>` : ""}
+          ${interview.intro ? `<p class="interview-intro">${escapeHtml(interview.intro)}</p>` : ""}
+          <div class="interview-qa">
+            ${interview.questions
+              .map(
+                (qa) => `
+                  <div class="interview-exchange">
+                    <p class="interview-q"><span class="qa-label">Q.</span>${escapeHtml(qa.question)}</p>
+                    <p class="interview-a"><span class="qa-label">A.</span>${escapeHtml(qa.answer)}</p>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+// ---------- team highlights (same team as the player interview above;
+// snapshotBuilder.mjs's buildTeamHighlight already computes all of this as
+// part of playerInterviewFeature.teamHighlight — this only renders it) ----------
+
+function renderTeamHighlightSection(teamHighlight) {
+  if (!teamHighlight) {
+    return "";
+  }
+
+  const standing = teamHighlight.standing ?? {};
+  const statusParts = [
+    standing.place ? `${formatOrdinal(standing.place)} place` : "",
+    standing.wins && standing.losses ? `${standing.wins}-${standing.losses}` : "",
+    standing.l10 ? `LAST 10: ${standing.l10}` : "",
+  ].filter(Boolean);
+
+  const rotation = (teamHighlight.rotation ?? []).slice(0, 5);
+  const bullpen = [...(teamHighlight.bullpen ?? [])].sort((left, right) => (left.rolePriority ?? 99) - (right.rolePriority ?? 99));
+  const topHitters = teamHighlight.topHitters ?? [];
+  const topSalaries = teamHighlight.topSalaries ?? [];
+  const historyNotes = teamHighlight.historyNotes ?? [];
+  const injuries = teamHighlight.injuries ?? [];
+
+  const blocks = [
+    rotation.length
+      ? renderTeamHighlightListBlock(
+          "Starting Rotation",
+          rotation.map((p) => `${p.pitcher} (${p.throws}) - ${p.wins}-${p.losses}, ${p.era} ERA`),
+        )
+      : "",
+    bullpen.length
+      ? renderTeamHighlightListBlock(
+          "Bullpen",
+          bullpen.map((p) => `${p.pitcher} (${p.role}) (${p.throws}) - ${p.wins}-${p.losses}, ${p.era} ERA`),
+        )
+      : "",
+    topHitters.length
+      ? renderTeamHighlightListBlock(
+          "Top 5 Hitters",
+          topHitters.map((h) => `${h.name} (${h.pos}) - ${h.avg} AVG, ${h.hr} HR, ${h.rbi} RBI`),
+        )
+      : "",
+    topSalaries.length
+      ? renderTeamHighlightListBlock("Top Salaries", topSalaries.map((s) => `${s.name} (${s.position}) - ${s.salary}`))
+      : "",
+    historyNotes.length ? renderTeamHighlightListBlock("History", historyNotes) : "",
+    injuries.length ? renderTeamHighlightListBlock("Current Injuries", injuries) : "",
+  ].filter(Boolean);
+
+  if (!statusParts.length && !blocks.length) {
+    return "";
+  }
+
+  return `
+    <section id="team-highlight" class="team-highlight-section">
+      <div class="label">Team Highlights</div>
+      <div class="team-highlight-header">
+        <img class="prospect-photo" src="${escapeHtml(logoRelativePath(teamHighlight.logoUrl))}" alt="" loading="lazy" onerror="this.remove()">
+        <div class="prospect-info">
+          <div class="prospect-name">${escapeHtml(teamHighlight.fullName ?? "")}</div>
+          ${statusParts.length ? `<div class="prospect-meta">${escapeHtml(statusParts.join(" | "))}</div>` : ""}
+          ${teamHighlight.manager ? `<div class="prospect-meta">Manager: ${escapeHtml(teamHighlight.manager)}</div>` : ""}
+          ${teamHighlight.affiliate ? `<div class="prospect-meta">Affiliate: ${escapeHtml(teamHighlight.affiliate)}</div>` : ""}
+        </div>
+      </div>
+      ${teamHighlight.summary?.length ? teamHighlight.summary.map((line) => `<p class="prospect-line">${escapeHtml(line)}</p>`).join("") : ""}
+      ${blocks.length ? `<div class="team-highlight-grid">${blocks.join("")}</div>` : ""}
+    </section>
+  `;
+}
+
+function renderTeamHighlightListBlock(title, items) {
+  return `
+    <div class="team-highlight-block">
+      <span class="sublabel">${escapeHtml(title)}</span>
+      <ul class="team-highlight-list">
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
     </div>
   `;
 }
@@ -1323,7 +1546,7 @@ function renderMinorLeaguePanel(league) {
 }
 
 function renderMinorLeagueNews(headlines) {
-  const items = dedupeHeadlines(headlines).slice(0, 3);
+  const items = sortHeadlines(dedupeHeadlines(headlines)).slice(0, 3);
   if (!items.length) {
     return "";
   }
@@ -1378,7 +1601,7 @@ function renderMinorStandingsTable(section) {
   return `
     <div>
       <span class="sublabel minor-sublabel">${escapeHtml(titleCase(section.label))}</span>
-      <table class="compact-table">
+      <table class="compact-table minor-standings-table">
         <tr><th>Team</th><th>W</th><th>L</th><th>GB</th></tr>
         ${section.rows
           .map(
@@ -1416,7 +1639,9 @@ function renderMinorLeagueLeaders(battingLeaderboards, pitchingLeaderboards) {
             (group) => `
               <div>
                 <div class="minor-leaders-title">${escapeHtml(group.title)}</div>
-                ${group.boards.map(renderMinorLeaderboardTable).join("")}
+                <div class="minor-leaders-column">
+                  ${group.boards.map(renderMinorLeaderboardTable).join("")}
+                </div>
               </div>
             `,
           )
@@ -1448,6 +1673,28 @@ function renderMinorLeaderboardTable(leaderboard) {
 }
 
 // ---------- data helpers ----------
+
+// "2nd place", "3rd place", etc. — used by the Team Highlights status line.
+function formatOrdinal(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    return "";
+  }
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) {
+    return `${n}th`;
+  }
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
 
 // Picks the division shown in the sidebar's compact standings snippet.
 // Rotates through every division by league date rather than always showing
@@ -1598,7 +1845,7 @@ const pageStyles = `
   .lead-column{display:flex; flex-direction:column; gap:32px;}
   .tag{display:inline-block; background:var(--green); color:#fff; font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; padding:4px 10px; margin-bottom:12px;}
   .dateline{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); letter-spacing:.04em; margin-bottom:12px;}
-  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label, .minor-leagues-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
+  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label, .minor-leagues-section > .label, .interview-section > .label, .team-highlight-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
   .headline-list{list-style:none; margin:14px 0 0 0; padding:0; display:flex; flex-direction:column;}
   .headline-list li{padding:14px 0; border-bottom:1px solid var(--rule);}
   .headline-list li:first-child{padding-top:0;}
@@ -1622,12 +1869,6 @@ const pageStyles = `
   td:first-child,th:first-child{text-align:left;}
   th{font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); font-weight:600;}
   td.value{font-weight:600;}
-  .opinion-headline-list{list-style:none; margin:12px 0 0 0; padding:0; display:flex; flex-direction:column;}
-  .opinion-headline-list li{padding:10px 0; border-bottom:1px solid var(--rule);}
-  .opinion-headline-list li:first-child{padding-top:0;}
-  .opinion-headline-list li:last-child{border-bottom:none;}
-  .opinion-headline-link{display:block; font-family:"Newsreader",serif; font-size:15px; font-weight:600; line-height:1.3; color:var(--ink);}
-  .opinion-headline-link:hover{color:var(--green);}
   .byline{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); margin-top:4px;}
   .scores-strip{padding:32px 32px 0 32px;}
   .scores-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(230px,1fr)); gap:14px; margin-top:14px;}
@@ -1710,6 +1951,25 @@ const pageStyles = `
   .milestone-item:last-child{border-bottom:none; padding-bottom:0;}
   .milestone-date{font-family:"IBM Plex Sans",sans-serif; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--green); flex-shrink:0; width:52px;}
   .milestone-body{font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--ink); line-height:1.5;}
+  .interview-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .interview-layout{display:grid; grid-template-columns:260px 1fr; gap:32px; margin-top:20px; align-items:start;}
+  @media (max-width: 860px){ .interview-layout{grid-template-columns:1fr;} }
+  .interview-transcript{min-width:0;}
+  .interview-headline{font-family:"Newsreader",serif; font-size:clamp(22px,2.8vw,28px); font-weight:600; line-height:1.2; margin:0 0 10px 0;}
+  .interview-intro{font-family:"IBM Plex Sans",sans-serif; font-size:13.5px; font-style:italic; color:var(--ink-soft); line-height:1.6; margin:0 0 22px 0;}
+  .interview-qa{display:flex; flex-direction:column; gap:20px;}
+  .interview-exchange{padding-bottom:20px; border-bottom:1px solid var(--rule);}
+  .interview-exchange:last-child{border-bottom:none; padding-bottom:0;}
+  .interview-q{font-family:"IBM Plex Sans",sans-serif; font-size:13.5px; font-weight:700; color:var(--ink); line-height:1.5; margin:0 0 8px 0;}
+  .interview-a{font-family:"Newsreader",serif; font-size:15.5px; color:var(--ink); line-height:1.65; margin:0;}
+  .qa-label{color:var(--green); font-weight:700; margin-right:6px;}
+  .team-highlight-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
+  .team-highlight-header{display:flex; align-items:center; gap:12px; margin-top:14px;}
+  .team-highlight-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:28px; margin-top:24px; align-items:start;}
+  .team-highlight-block{display:flex; flex-direction:column; min-width:0;}
+  .team-highlight-list{list-style:none; margin:8px 0 0 0; padding:0; display:flex; flex-direction:column;}
+  .team-highlight-list li{padding:6px 0; border-bottom:1px solid var(--rule); font-family:"IBM Plex Sans",sans-serif; font-size:12.5px; color:var(--ink); line-height:1.5;}
+  .team-highlight-list li:last-child{border-bottom:none; padding-bottom:0;}
   .minor-leagues-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .minor-leagues-stack{display:flex; flex-direction:column; gap:28px; margin-top:20px;}
   .minor-league-panel{display:flex; flex-direction:column; gap:18px;}
@@ -1722,20 +1982,33 @@ const pageStyles = `
   .minor-standings-column{display:flex; flex-direction:column; gap:12px;}
   .minor-leaders-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(170px,1fr)); gap:12px 20px; margin-top:8px;}
   .minor-leaders-title{font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.06em; font-weight:700; text-transform:uppercase; color:var(--ink-soft); margin-bottom:6px;}
+  .minor-leaders-column{display:flex; flex-direction:column; gap:12px;}
   .minor-sublabel{font-size:10px;}
   .compact-table{margin-top:4px;}
   .compact-table td, .compact-table th{padding:3px 5px; font-size:11px;}
+  /* Fixed column widths so W/L/GB line up the same way across every
+     division table, regardless of how long that division's team names
+     happen to run (browsers otherwise auto-size each table's columns
+     independently from its own content). */
+  .minor-standings-table{table-layout:fixed;}
+  .minor-standings-table th:first-child, .minor-standings-table td:first-child{width:52%;}
+  .minor-standings-table th:not(:first-child), .minor-standings-table td:not(:first-child){width:16%;}
   .opinion-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
-  .opinion-articles{display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:28px; margin-top:20px; align-items:start;}
-  .opinion-article{padding:22px; border:1px solid var(--rule); border-radius:6px; background:oklch(0.995 0.003 80); box-shadow:0 1px 2px oklch(0.18 0.012 260 / 0.05);}
+  /* Reads as a feature article rather than a card grid, matching
+     .news-article's readable-body treatment below — appropriate now that
+     the section is normally a single columnist rather than a multi-card
+     comparison (see the note above renderOpinionSection). */
+  .opinion-articles{display:flex; flex-direction:column; gap:8px; margin-top:20px;}
+  .opinion-article{padding-bottom:32px; margin-bottom:32px; border-bottom:1px solid var(--rule);}
+  .opinion-article:last-child{border-bottom:none; margin-bottom:0; padding-bottom:0;}
   .opinion-byline-row{display:flex; align-items:center; gap:10px; margin-bottom:16px;}
   .opinion-avatar{width:42px; height:42px; border-radius:50%; object-fit:cover; border:1px solid var(--rule); flex-shrink:0;}
   .opinion-name{font-family:"IBM Plex Sans",sans-serif; font-size:12.5px; font-weight:700; color:var(--ink);}
   .opinion-role{font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; color:var(--ink-soft); margin-top:1px;}
-  .opinion-article h3{margin:0 0 10px 0; font-size:18px; font-weight:600; line-height:1.25;}
-  .opinion-article p{font-size:13.5px; line-height:1.55; margin:0 0 10px 0;}
+  .opinion-article h3{margin:0 0 6px 0; font-size:clamp(22px,3vw,30px); font-weight:600; line-height:1.15;}
+  .opinion-article p{font-size:15px; line-height:1.6; margin:0 0 14px 0; max-width:760px;}
   .opinion-article p:last-child{margin-bottom:0;}
-  .opinion-article .article-list{font-size:13.5px; line-height:1.55;}
+  .opinion-article .article-list{font-size:15px; line-height:1.6; max-width:760px;}
   .wire-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .wire-grid{display:grid; grid-template-columns:1fr 1fr; gap:40px; margin-top:20px;}
   @media (max-width: 700px){ .wire-grid{grid-template-columns:1fr;} }

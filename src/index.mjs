@@ -7,7 +7,8 @@ import { parseOotpExport } from "./parsers/ootpParser.mjs";
 import { enrichHeadlinesWithArticleContent } from "./services/articleResolver.mjs";
 import { buildSnapshot } from "./services/snapshotBuilder.mjs";
 import { enrichSnapshotWithHistory } from "./services/historyContext.mjs";
-import { buildColumns } from "./services/columnFactory.mjs";
+import { buildColumns } from "./services/aiColumnFactory.mjs";
+import { buildPlayerInterviewContent } from "./services/aiInterviewFactory.mjs";
 import { renderFrontPageHtml } from "./views/renderFrontPage.mjs";
 
 async function main() {
@@ -37,8 +38,11 @@ async function main() {
     const headlineSnapshot = await enrichHeadlinesWithArticleContent(baseSnapshot, htmlFiles);
     const snapshot = enrichSnapshotWithHistory(headlineSnapshot);
     const previousColumnState = await readColumnState(outputDir);
-    const columns = buildColumns(snapshot, config, previousColumnState);
-    const html = renderFrontPageHtml(snapshot, columns, config);
+    const [columns, interview] = await Promise.all([
+      buildColumns(snapshot, config, previousColumnState),
+      buildPlayerInterviewContent(snapshot, config),
+    ]);
+    const html = renderFrontPageHtml(snapshot, columns, config, interview);
 
     await fs.writeFile(
       path.join(outputDir, "snapshot.json"),
@@ -47,7 +51,7 @@ async function main() {
     );
     await fs.writeFile(
       path.join(outputDir, "column-state.json"),
-      JSON.stringify(buildColumnState(columns, snapshot.generatedAt), null, 2),
+      JSON.stringify(buildColumnState(columns, snapshot.generatedAt, previousColumnState), null, 2),
       "utf8",
     );
     await fs.writeFile(path.join(outputDir, "edition.html"), html, "utf8");
@@ -96,18 +100,35 @@ async function readColumnState(outputDir) {
   }
 }
 
-function buildColumnState(columns, generatedAt) {
+// Keeps the flat { headline, topicKey, targetKey } shape the algorithmic
+// columnFactory.mjs builders expect as "previousColumn" (so the AI
+// factory's per-columnist fallback still works exactly like before), and
+// adds a short rolling history ("recent") of each columnist's last few
+// headlines, which the AI factory feeds back into its prompt so a
+// columnist doesn't repeat the same angle for several days running.
+const MAX_RECENT_HEADLINES = 5;
+
+function buildColumnState(columns, generatedAt, previousState = {}) {
   return {
     generatedAt,
     columns: Object.fromEntries(
-      columns.map((column) => [
-        column.author,
-        {
-          headline: column.headline,
-          topicKey: column.topicKey ?? "",
-          targetKey: column.targetKey ?? "",
-        },
-      ]),
+      columns.map((column) => {
+        const priorRecent = previousState[column.author]?.recent ?? [];
+        const recent = [
+          { headline: column.headline, topicKey: column.topicKey ?? "", generatedAt },
+          ...priorRecent,
+        ].slice(0, MAX_RECENT_HEADLINES);
+
+        return [
+          column.author,
+          {
+            headline: column.headline,
+            topicKey: column.topicKey ?? "",
+            targetKey: column.targetKey ?? "",
+            recent,
+          },
+        ];
+      }),
     ),
   };
 }
