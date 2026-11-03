@@ -4,7 +4,7 @@ rd /s /q "D:\ABADailyPress\News"
 mkdir "D:\ABADailyPress\News"
 
 echo Copying new content...
-xcopy "C:\Users\rockn\OneDrive\Documents\Out of the Park Developments\OOTP Baseball 26\saved_games\American Baseball Association2.lg\news\html\*" "D:\ABADailyPress\News\" /E /H /C /I /Y
+xcopy "C:\Users\rockn\OneDrive\Documents\Out of the Park Developments\OOTP Baseball 27\saved_games\ABA.lg\news\html\*" "D:\ABADailyPress\News\" /E /H /C /I /Y
 
 echo Copy completed!
 

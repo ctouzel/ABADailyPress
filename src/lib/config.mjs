@@ -11,6 +11,12 @@ const defaultConfig = {
   // place to correct any league fact the AI keeps getting wrong.
   leagueContext:
     "The American Baseball League runs on its own calendar and scale, not real MLB's. The regular season is 92 games long, not 162 — never describe a \"long season\", a \"six-month grind\", or make any length- or pace-based comparison that assumes the real MLB slate. The postseason begins in July, not September or October. Rely only on the standings, schedule, and dates in the data given below for anything about season timing or length; never assume real-world MLB scheduling, awards, records, or history.",
+  // Length of the regular season in games — the same fact as in
+  // leagueContext above, but as a number the code itself can use (e.g. to
+  // tell early season from late season for the standings' Magic Number
+  // column in renderFrontPage.mjs). Keep this in sync with leagueContext
+  // if the league's schedule ever changes.
+  regularSeasonGames: 92,
   columnists: [
     {
       name: "Mack Dalton",
@@ -37,7 +43,7 @@ const defaultConfig = {
       role: "Team-trend columnist",
       voice:
         "narrative and atmospheric, thinks in seasons rather than single games, ties tonight's result to the shape of a division race or a franchise's history",
-      focus: "the slow-building arcs in the standings and division races — what's forming before it shows up in the numbers",
+      focus: "the slow-building arcs in the standings and division races — what's forming before it shows up in the numbers, and where he thinks it's headed: a real prediction for how a race or a playoff series ends",
     },
   ],
 };

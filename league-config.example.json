@@ -3,6 +3,7 @@
   "leagueName": "United Association",
   "city": "Port Victoria",
   "leagueContext": "This league runs on its own calendar and scale, not real MLB's — replace this with whatever season-calendar, season-length, or scheduling facts about your league the AI columnists/interviewer keep getting wrong (e.g. \"the regular season is 92 games, not 162\" or \"the postseason begins in July, not September or October\"). Rely only on the standings, schedule, and dates in the data given for anything about season timing or length; never assume real-world MLB scheduling, awards, records, or history.",
+  "regularSeasonGames": 162,
   "columnists": [
     {
       "name": "Mack Dalton",

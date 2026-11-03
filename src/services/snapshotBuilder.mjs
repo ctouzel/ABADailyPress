@@ -78,7 +78,7 @@ export function buildSnapshot(parsedPages, config) {
   const teamCareerLeaders = buildRandomTeamCareerLeaders(standingsSections);
   const leagueCareerLeaders = buildLeagueCareerLeaders(preferredLeagueId);
   const positionCareerLeaderboard = buildPositionCareerLeaderboard(preferredLeagueId);
-  const numberOnePicksFeature = buildRandomTeamNumberOnePicks(standingsSections);
+  const numberOnePicksFeature = buildRandomTeamNumberOnePicks(standingsSections, preferredLeagueId);
   const topGamePerformancesFeature = buildTopGamePerformancesFeature(preferredLeagueId);
   const championshipChase = buildChampionshipChase(primaryLeagueView, {
     visibleStartMonth: 5,
@@ -278,7 +278,7 @@ function buildRandomTeamCareerLeaders(standingsSections = []) {
   };
 }
 
-function buildRandomTeamNumberOnePicks(standingsSections = []) {
+function buildRandomTeamNumberOnePicks(standingsSections = [], leagueId = "200") {
   const historyDir = path.resolve("News", "history");
   if (!fs.existsSync(historyDir)) {
     return null;
@@ -328,10 +328,107 @@ function buildRandomTeamNumberOnePicks(standingsSections = []) {
 
   const selected = candidates[pickStableIndex("number-one-picks-team", candidates.length)] ?? candidates[0];
 
+  // Only the selected team's picks are cross-checked against the league's
+  // transaction log (expensive — reads every transaction shard for every
+  // year), never every candidate team, since only one team's picks ever get
+  // displayed.
+  const resolvedPicks = resolveTrueFirstRoundPicks(selected.picks, leagueId, selected.teamId);
+
   return {
     teamId: selected.teamId,
     teamName: selected.teamName,
-    picks: selected.picks.slice(0, 15),
+    picks: resolvedPicks.slice(0, 15),
+  };
+}
+
+// The team draft-history page's "Pick 1" grid column only lists the team's
+// first SIGNED draftee for that year — a round-1 pick who failed to sign
+// (and was never reported to this org) is simply absent, so the grid's first
+// column silently shows whichever later-round pick signed first instead.
+// Cross-reference the league's own transaction log (which records every
+// draft selection, signed or not) to recover the team's true earliest pick
+// each year, and flag it when that player never signed.
+function resolveTrueFirstRoundPicks(picks, leagueId, teamId) {
+  return (picks ?? []).map((pick) => {
+    const truePick = leagueId && teamId ? findTrueFirstDraftPick(leagueId, teamId, pick.year) : null;
+
+    if (!truePick || !truePick.playerId || truePick.playerId === pick.playerId) {
+      return {
+        year: pick.year,
+        player: pick.player,
+        position: pick.position,
+        currentTeam: pick.currentTeam,
+        didNotSign: Boolean(truePick?.didNotSign && truePick.playerId === pick.playerId),
+      };
+    }
+
+    const playerPath = path.resolve("News", "players", `player_${truePick.playerId}.html`);
+    const profile = readDraftHistoryPlayerProfile(playerPath, truePick.playerName);
+
+    return {
+      year: pick.year,
+      player: profile.name,
+      position: profile.position,
+      currentTeam: profile.currentTeam || "",
+      didNotSign: truePick.didNotSign,
+    };
+  });
+}
+
+// Finds a team's actual earliest draft selection for a given year straight
+// from the league transaction log (every "Drafted ..." and "Failed to sign
+// ..." entry), rather than from the team's own draft-history page, which
+// only lists picks that signed. Returns null when the transaction log for
+// that year doesn't contain the detailed "(Round N, Pick M, Kth overall
+// pick)" reporting this relies on (only present from a certain season
+// onward in this league's history).
+function findTrueFirstDraftPick(leagueId, teamId, year) {
+  const historyDir = path.resolve("News", "history");
+  const draftPattern = new RegExp(
+    `<a href="\\.\\./teams/team_${teamId}\\.html">[^<]+</a>: Drafted ([A-Z0-9-]+) <a href="\\.\\./players/player_(\\d+)\\.html">([^<]+)</a> in the ${year} first-year player draft \\(Round (\\d+), Pick (\\d+), (\\d+)[a-z]{2} overall pick\\)\\.`,
+    "gi",
+  );
+
+  let best = null;
+  const shardTexts = [];
+
+  for (let shard = 0; shard <= 12; shard += 1) {
+    const filePath = path.join(historyDir, `league_${leagueId}_transactions_${shard}_${year}.html`);
+    const rawHtml = safeReadFile(filePath);
+    if (!rawHtml) {
+      continue;
+    }
+    shardTexts.push(rawHtml);
+
+    for (const match of rawHtml.matchAll(draftPattern)) {
+      const overallPick = Number.parseInt(match[6], 10);
+      if (!Number.isFinite(overallPick)) {
+        continue;
+      }
+      if (!best || overallPick < best.overallPick) {
+        best = {
+          playerId: match[2],
+          playerName: cleanHtmlText(match[3] ?? ""),
+          overallPick,
+        };
+      }
+    }
+  }
+
+  if (!best) {
+    return null;
+  }
+
+  const failedToSignPattern = new RegExp(
+    `<a href="\\.\\./teams/team_${teamId}\\.html">[^<]+</a>: Failed to sign \\w+ round draft pick <a href="\\.\\./players/player_${best.playerId}\\.html">`,
+    "i",
+  );
+  const didNotSign = shardTexts.some((html) => failedToSignPattern.test(html));
+
+  return {
+    playerId: best.playerId,
+    playerName: best.playerName,
+    didNotSign,
   };
 }
 
@@ -364,6 +461,7 @@ function extractTeamDraftHistoryFirstPicks(baseFilePath, rawHtml) {
       player: playerProfile.name,
       position: playerProfile.position,
       currentTeam: playerProfile.currentTeam || "",
+      playerId,
     });
   }
 
@@ -1045,6 +1143,24 @@ function findTeamRecord(recordByTeamKey, teamName) {
   return "";
 }
 
+// Strips a known mascot word/phrase off the end of a team name so "X
+// Mascot" and the bare city/market name "X" (the form a lot of in-game
+// text — box scores, headlines — uses) resolve to the same team. This
+// list has to be kept in sync by hand with every mascot in the export,
+// which is exactly how two Frontier League teams (Longueuil Ducs, Midland
+// RockHounds) silently fell through it: their mascots were simply never
+// added, so nothing referring to them by city name alone (e.g. a
+// completed-game box score) could be matched back to the full team name
+// used elsewhere (e.g. a scheduled-game listing) — the visible symptom
+// was the playoff bracket showing their series stuck at 0-0 forever.
+// Audited against the full News/teams/*.html roster (both leagues) on
+// 2026-10-20 and extended with every mascot that was missing at the time;
+// a newly added or renamed team can still fall through this same way, so
+// if a team's series/record/stat line ever looks wrong, check here first.
+const KNOWN_TEAM_MASCOTS =
+  "red wings|capitales|sidewinders|privateers|canadians|grizzlies|river cats|isotopes|emeralds|knights|bananas|clippers|wizards|dragons|mets|bulls|sea dogs|mud hens|ospreys|eagles|tides|cannons|indians|tigers|missions|mudcats|blaze|berries|aigles|yard goats|iron pigs|curve|pippins|goldeyes|" +
+  "ducs|rockhounds|ironbirds|rougarou|trappers|senators|lugnuts|nuts|titans|chiefs|aces|expos|rawhide";
+
 function buildTeamLookupKeys(teamName) {
   const normalizedName = normalizeTeamLookupValue(teamName);
   if (!normalizedName) {
@@ -1053,7 +1169,7 @@ function buildTeamLookupKeys(teamName) {
 
   const keys = new Set([normalizedName]);
   const marketOnly = normalizedName.replace(
-    /\s+(red wings|capitales|sidewinders|privateers|canadians|grizzlies|river cats|isotopes|emeralds|knights|bananas|clippers|wizards|dragons|mets|bulls|sea dogs|mud hens|ospreys|eagles|tides|cannons|indians|tigers|missions|mudcats|blaze|berries|aigles|yard goats|iron pigs|curve|pippins|goldeyes)$/i,
+    new RegExp(`\\s+(${KNOWN_TEAM_MASCOTS})$`, "i"),
     "",
   ).trim();
 
@@ -1297,11 +1413,19 @@ function determineLeagueMode(currentDate, leagueView) {
     return "SEASON_ENDED";
   }
 
-  if (month === 7 && day >= 17) {
+  // Playoffs run July 17 through the August 18 offseason cutoff above —
+  // a champion-crowned postseason is already caught by SEASON_ENDED just
+  // above, so reaching here with month 8 means the postseason is still
+  // underway (no champion yet).
+  if ((month === 7 && day >= 17) || month === 8) {
     return "PLAYOFFS";
   }
 
-  if (month === 6 && day >= 3) {
+  // Late season runs June 3 through July 16. July 1-16 used to fall
+  // through all the way to the final OFFSEASON case below by mistake —
+  // nothing else in this chain claimed it — which is what made the
+  // Championship Chase section vanish for the first half of July.
+  if ((month === 6 && day >= 3) || month === 7) {
     return "LATE_SEASON";
   }
 
@@ -1319,6 +1443,12 @@ function determineLeagueMode(currentDate, leagueView) {
 
   if ((month === 2 && day >= 9) || month === 3) {
     return "PRESEASON";
+  }
+
+  // June 1-2 (before late season starts on June 3) fell through to
+  // OFFSEASON by the same mistake as July 1-16 above.
+  if (month === 6) {
+    return "MIDDLE_SEASON";
   }
 
   return "OFFSEASON";
@@ -1677,7 +1807,43 @@ function applyPlayoffResultsToRound(roundMatchups, postseasonResults, roundKey, 
     .filter(Boolean)
     .sort(compareResolvedPlayoffMatchups);
 
-  return stageMatches.length ? stageMatches : roundMatchups;
+  if (!stageMatches.length) {
+    return roundMatchups;
+  }
+
+  // A round only ever has more than one scheduled matchup at once in a
+  // bracket format where nothing feeds into one of its slots from an
+  // earlier round — e.g. the division round when there's no Wild Card
+  // Series (3 division winners + 1 wildcard: #1 seed vs the wildcard team,
+  // and #2 vs #3, both real from the start). Wholesale-replacing the round
+  // with just the stage's completed series — the old behavior — silently
+  // dropped whichever matchup hadn't played a game yet (the exact bug that
+  // made the #1 seed's entire series vanish from the Frontier League
+  // bracket). Below, each scheduled matchup keeps its own result (matched
+  // by team identity) and stays in its scheduled/0-0 form otherwise, so a
+  // not-yet-started series shows as a live 0-0 matchup rather than
+  // disappearing.
+  if (roundMatchups.length <= 1) {
+    return stageMatches;
+  }
+
+  return roundMatchups.map((original) => {
+    const originalTeamKeys = (original?.matchup ?? [])
+      .filter((entry) => entry && !entry.placeholder)
+      .flatMap((entry) => buildTeamLookupKeys(entry?.fullName ?? entry?.team ?? ""));
+
+    if (!originalTeamKeys.length) {
+      return original;
+    }
+
+    const resolved = stageMatches.find((stageMatch) =>
+      (stageMatch.matchup ?? []).some((entry) =>
+        buildTeamLookupKeys(entry?.fullName ?? entry?.team ?? "").some((key) => originalTeamKeys.includes(key)),
+      ),
+    );
+
+    return resolved ?? original;
+  });
 }
 
 function buildResolvedPlayoffMatchup(result, roundKey, teamDirectory, knownTeams, standingsSections, options = {}) {
@@ -1847,6 +2013,14 @@ function promoteAdvancedTeamsIntoRoundPlaceholders(targetRound = [], sourceRound
   }));
 }
 
+// The "today" scoreboard page (leagueView.scorePage) and each daily history
+// page in News/leagues/league_{id}_scores_YYYY_MM_DD.html share the exact
+// same OOTP export markup, so this same block pattern finds a team pairing
+// on either one.
+function createScoreboardMatchupPattern() {
+  return /<table cellspacing="0" cellpadding="0" width="478px" height="100%" class="databg">[\s\S]*?<td class="dl" width="210px"><a [^>]*>([^<]+)<\/a><\/td>\s*<td class="dl" width="210px">([^<]+)<\/td>[\s\S]*?<td class="dl" width="210px"><a [^>]*>([^<]+)<\/a><\/td>\s*<td class="dl" width="210px">([^<]+)<\/td>[\s\S]*?<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>/gi;
+}
+
 function buildPlayoffSeriesTracker(leagueView) {
   const tracker = new Map();
   const scheduleDate = parseCurrentScoreboardDate(leagueView?.scorePage);
@@ -1854,20 +2028,44 @@ function buildPlayoffSeriesTracker(leagueView) {
     leagueView?.scoreHistoryPages ?? [],
     loadScoreHistoryPagesForLeague(leagueView?.leagueId ?? ""),
   );
-  if (!scheduleDate || !scoreHistoryPages.length || !leagueView?.scorePage?.rawHtml) {
+  if (!scheduleDate || !scoreHistoryPages.length) {
     return tracker;
   }
 
-  const blockPattern =
-    /<table cellspacing="0" cellpadding="0" width="478px" height="100%" class="databg">[\s\S]*?<td class="dl" width="210px"><a [^>]*>([^<]+)<\/a><\/td>\s*<td class="dl" width="210px">([^<]+)<\/td>[\s\S]*?<td class="dl" width="210px"><a [^>]*>([^<]+)<\/a><\/td>\s*<td class="dl" width="210px">([^<]+)<\/td>[\s\S]*?<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>/gi;
+  // A playoff series doesn't necessarily have a game on every single day
+  // (travel days, or one bracket slot simply pacing a day behind another),
+  // so a pairing that isn't on TODAY's scoreboard would otherwise never get
+  // looked up at all and would silently default to a false "0-0" — that
+  // was the actual bug (not a parsing issue with either team's name).
+  // Instead, collect every pairing that's appeared on any recent
+  // scoreboard — today's plus the last few days of history — and resolve
+  // each one's real series record via inferScheduledSeriesContext, which
+  // already walks the game-by-game box scores rather than assuming "today".
+  const pairs = new Map();
+  const collectPairs = (rawHtml) => {
+    for (const match of String(rawHtml ?? "").matchAll(createScoreboardMatchupPattern())) {
+      const awayTeam = cleanHtmlText(match[1] ?? "");
+      const homeTeam = cleanHtmlText(match[3] ?? "");
+      if (!awayTeam || !homeTeam) {
+        continue;
+      }
+      const key = buildSeriesMatchupKey(awayTeam, homeTeam);
+      if (!pairs.has(key)) {
+        pairs.set(key, { awayTeam, homeTeam });
+      }
+    }
+  };
 
-  for (const match of String(leagueView.scorePage.rawHtml).matchAll(blockPattern)) {
-    const awayTeam = cleanHtmlText(match[1] ?? "");
-    const homeTeam = cleanHtmlText(match[3] ?? "");
-    if (!awayTeam || !homeTeam) {
+  collectPairs(leagueView?.scorePage?.rawHtml);
+  for (const page of scoreHistoryPages) {
+    const pageDate = parseScoreboardDate(page.title || page.summary || page.rawHtml);
+    if (!pageDate || differenceInDays(scheduleDate, pageDate) > 4) {
       continue;
     }
+    collectPairs(page.rawHtml);
+  }
 
+  for (const { awayTeam, homeTeam } of pairs.values()) {
     const context = inferScheduledSeriesContext(awayTeam, homeTeam, scheduleDate, scoreHistoryPages);
     tracker.set(buildSeriesMatchupKey(awayTeam, homeTeam), context);
   }
@@ -2583,46 +2781,90 @@ function buildPlayerMilestones(page) {
 }
 
 function buildPositionalStrengthFeature(page, leaguePlayers = []) {
-  if (!page?.tables?.length) {
+  if (!page?.rawHtml) {
     return null;
   }
 
-  const positionTables = page.tables.filter(
-    (table) =>
-      table.label &&
-      table.headers?.[0] === "Team" &&
-      table.headers?.includes("Top player") &&
-      table.headers?.includes("Overall ranking"),
-  );
-
-  if (!positionTables.length) {
+  const positionBlocks = extractPositionalStrengthBlocks(page.rawHtml);
+  if (!positionBlocks.length) {
     return null;
   }
 
-  const selectedIndex = pickStableIndex("positional-strength", positionTables.length);
-  const selectedTable = positionTables[selectedIndex] ?? positionTables[0];
+  const selectedIndex = pickStableIndex("positional-strength", positionBlocks.length);
+  const selectedBlock = positionBlocks[selectedIndex] ?? positionBlocks[0];
   const playerDirectory = buildPositionalStrengthPlayerDirectory(leaguePlayers);
-  const players = (selectedTable.rows ?? [])
-    .slice(0, 20)
-    .map((row, index) => {
-      const team = cleanHtmlText(row[0] ?? "");
-      const player = cleanHtmlText(row[1] ?? "");
-      const playerProfile = playerDirectory.get(buildProspectLookupKey(player, team));
+
+  // The export lists one row per team in team-standings order, not in
+  // positional-strength order — each row's own "Overall ranking" column is
+  // the thing that actually ranks players at this position league-wide
+  // (1st = the league's best), so sort by that instead of row order.
+  const players = selectedBlock.rows
+    .map((row) => {
+      const overallRank = Number.parseInt(row.overallRank, 10);
+      if (!row.team || !row.player || !Number.isFinite(overallRank)) {
+        return null;
+      }
+
+      const playerProfile = playerDirectory.get(buildProspectLookupKey(row.player, row.team));
 
       return {
-        rank: index + 1,
-        team,
-        player,
+        rank: overallRank,
+        team: row.team,
+        player: row.player,
         age: playerProfile?.age ? String(playerProfile.age) : "",
         salary: readPositionalRankingPlayerSalary(playerProfile),
       };
     })
-    .filter((entry) => entry.team && entry.player);
+    .filter(Boolean)
+    .sort((left, right) => left.rank - right.rank)
+    .slice(0, 10);
+
+  if (!players.length) {
+    return null;
+  }
 
   return {
-    position: toTitleCase(selectedTable.label),
+    position: toTitleCase(selectedBlock.position),
     players,
   };
+}
+
+// The generic table parser (extractTables/extractCells in ootpParser.mjs)
+// drops any EMPTY <td> cell from a row entirely — harmless for most tables,
+// but this report's "Top prospect" column is routinely blank (a team with
+// no standout prospect at the position), which silently shifts every column
+// after it one slot to the left and corrupts the "Overall ranking" value
+// for that row. That's exactly what made the #1 (and #10) ranked player
+// vanish from the list. Parse this page's own raw HTML directly instead,
+// reading each of the table's 6 columns by fixed position so a blank cell
+// stays a blank cell rather than collapsing the row.
+function extractPositionalStrengthBlocks(rawHtml) {
+  const blockPattern =
+    /<td valign="bottom" class="boxtitle">\s*([^<]+?)\s*<\/td>[\s\S]*?<table class="data sortable"[^>]*>([\s\S]*?)<\/table>/gi;
+  const rowPattern =
+    /<tr>\s*<td class="dl">(?:<a[^>]*>([^<]*)<\/a>)?<\/td>\s*<td class="dl">(?:<a[^>]*>([^<]*)<\/a>)?<\/td>\s*<td class="dc">([^<]*)<\/td>\s*<td class="dl">(?:<a[^>]*>([^<]*)<\/a>)?<\/td>\s*<td class="dc">([^<]*)<\/td>\s*<td class="dc">([^<]*)<\/td>\s*<\/tr>/gi;
+
+  const blocks = [];
+
+  for (const blockMatch of rawHtml.matchAll(blockPattern)) {
+    const position = cleanHtmlText(blockMatch[1] ?? "");
+    const tableHtml = blockMatch[2] ?? "";
+    if (!position) {
+      continue;
+    }
+
+    const rows = [...tableHtml.matchAll(rowPattern)].map((rowMatch) => ({
+      team: cleanHtmlText(rowMatch[1] ?? ""),
+      player: cleanHtmlText(rowMatch[2] ?? ""),
+      overallRank: cleanHtmlText(rowMatch[6] ?? ""),
+    }));
+
+    if (rows.length) {
+      blocks.push({ position, rows });
+    }
+  }
+
+  return blocks;
 }
 
 function buildPositionalStrengthPlayerDirectory(leaguePlayers = []) {
@@ -6927,6 +7169,7 @@ function readManagerHighlightCoachProfile(coachPath, team, staffEntry) {
         year: row.year,
         position: row.job,
         team: row.team,
+        record: Number.isFinite(row.wins) && Number.isFinite(row.losses) ? `${row.wins}-${row.losses}` : "",
         playoffs: row.postseason,
       })),
     summary,
@@ -7277,6 +7520,21 @@ function extractFinancialTopSalaries(rawHtml) {
     .sort((left, right) => (left.rank ? Number.parseInt(left.rank, 10) : 999) - (right.rank ? Number.parseInt(right.rank, 10) : 999));
 }
 
+// index.mjs writes the generated edition to <rootDir>/dist/edition.html,
+// a sibling of the News/ export folder under the same project root. The
+// person opens that file directly (file:///D:/ABADailyPress/dist/edition.html
+// — see e.g. the coach-highlight source-file link used earlier in this
+// project), not through a web server, so an image src has to be an
+// ordinary relative path from edition.html's own location — a
+// server-root-absolute path like "/news/..." has no server root to
+// resolve against under file:// and silently 404s (the <img> tags then
+// vanish via onerror="this.remove()", so every photo/logo across the site
+// — player, coach, prospect, team-logo, box-score headshots — was quietly
+// missing). Since dist/ sits one level below the project root, same as
+// News/, "../" + the path relative to News/'s parent lands on the real
+// file regardless of News/'s on-disk capitalization. If the output
+// directory is ever configured deeper than one level under the project
+// root (a custom --output), this "../" needs to change to match.
 function toNewsLocalUrl(baseFilePath, relativeSrc) {
   if (!relativeSrc) {
     return "";
@@ -7293,8 +7551,12 @@ function toNewsLocalUrl(baseFilePath, relativeSrc) {
     return cleanedSrc;
   }
 
-  const relativePath = path.relative(newsRoot, absolutePath).split(path.sep).map(encodeURIComponent).join("/");
-  return `/news/${relativePath}`;
+  const relativeFromProjectRoot = path
+    .relative(path.dirname(newsRoot), absolutePath)
+    .split(path.sep)
+    .map(encodeURIComponent)
+    .join("/");
+  return `../${relativeFromProjectRoot}`;
 }
 
 function findContainingFolder(filePath, folderName) {

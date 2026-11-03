@@ -11,10 +11,11 @@
 // down the page with every standings table, then Matt Gropius's Hot Takes
 // column, then an injuries/transactions footer ticker.
 //
-// Sections not yet designed (career leaders, the playoff bracket,
-// financial data, manager/prospect features, the Frontier League mirror,
-// etc.) are intentionally left out for now rather than guessed at — see
-// the project notes for what's still open.
+// Sections not yet designed (positional leaderboard rankings, financial
+// data, etc.) are intentionally left out for now rather than guessed at
+// — see the project notes for what's still open.
+
+import { isLateSeason as isLateSeasonShared } from "../lib/seasonProgress.mjs";
 
 export function renderFrontPageHtml(snapshot, columns, config, interview) {
   const newspaperName = config?.newspaperName ?? "The ABA Daily Press";
@@ -30,6 +31,13 @@ export function renderFrontPageHtml(snapshot, columns, config, interview) {
     snapshot.pitchingLeaderboards ?? [],
     snapshot.leagueDateLabel,
   );
+  const showMagicNumber = isLateSeason(snapshot.standingsSections ?? [], config);
+  // In the offseason there are no stars of the day, no division race to
+  // feature, no leaderboard to snapshot, and no games were played last
+  // night — so the sidebar and the game-recap sections below it are all
+  // dead weight. Collapse the two-column hero grid to one column rather
+  // than leaving the sidebar's track blank.
+  const isOffseason = snapshot.currentMode === "OFFSEASON";
 
   return `<!doctype html>
 <html lang="en">
@@ -61,35 +69,61 @@ export function renderFrontPageHtml(snapshot, columns, config, interview) {
     </div>
   </header>
 
-  <div class="main-grid">
+  <div class="main-grid${isOffseason ? " main-grid-solo" : ""}">
     <div class="lead-column">
-      ${featuredHeadlines.length ? renderHeadlineList(featuredHeadlines) : `<p class="empty-state">No headline candidates were detected in the current export.</p>`}
+      ${
+        featuredHeadlines.length
+          ? isOffseason
+            ? renderFullWireExpanded(featuredHeadlines)
+            : renderHeadlineList(featuredHeadlines)
+          : `<p class="empty-state">No headline candidates were detected in the current export.</p>`
+      }
     </div>
-
+${
+  isOffseason
+    ? ""
+    : `
     <aside class="sidebar">
       ${renderThreeStars(snapshot.threeStarsOfDay ?? [])}
       ${featured ? renderStandingsSnippet(featured) : ""}
       ${featuredLeaderboard ? renderLeadersSnippet(featuredLeaderboard) : ""}
-    </aside>
+    </aside>`
+}
   </div>
 
-  ${renderBoxScores(snapshot.lastDayScores ?? [])}
+  ${isOffseason ? "" : renderBoxScores(snapshot.lastDayScores ?? [])}
+
+  ${isOffseason ? "" : renderTopGamePerformancesSection(snapshot.topGamePerformancesFeature)}
 
   ${renderPlayoffRace(snapshot.championshipChase)}
 
-  ${renderNewsSection(featuredHeadlines)}
+  ${isOffseason ? "" : renderNewsSection(featuredHeadlines)}
 
-  ${renderPennantRaces(snapshot.standingsSections ?? [])}
+  ${
+    isOffseason || snapshot.championshipChase?.phase === "playoffs"
+      ? ""
+      : renderPennantRaces(snapshot.standingsSections ?? [], showMagicNumber)
+  }
 
   ${renderOpinionSection(columns ?? [])}
 
   ${renderLeadersSection(snapshot.battingLeaderboards ?? [], snapshot.pitchingLeaderboards ?? [])}
+
+  ${renderPositionalStrengthSection(snapshot.positionalStrengthFeature)}
+
+  ${renderHistoricalLeadersSection(snapshot.leagueCareerLeaders, snapshot.teamCareerLeaders)}
+
+  ${renderPositionalRankingsSection(snapshot.positionCareerLeaderboard)}
+
+  ${renderNumberOnePicksSection(snapshot.numberOnePicksFeature)}
 
   ${renderFooterTicker(snapshot.injuries ?? [], snapshot.transactions ?? [])}
 
   ${renderSchedule(snapshot.scheduledGames ?? [])}
 
   ${renderProspectsSection(snapshot.prospectHighlight, snapshot.topFarmSystems ?? [])}
+
+  ${renderFreeAgentsSection(snapshot.upcomingFreeAgents ?? [])}
 
   ${renderMilestonesSection(snapshot.playerMilestones ?? [], snapshot.managerHighlightFeature)}
 
@@ -102,6 +136,24 @@ export function renderFrontPageHtml(snapshot, columns, config, interview) {
 </div>
 </body>
 </html>`;
+}
+
+// ---------- collapsible sections (native <details>/<summary>, no JS) ----------
+//
+// Wraps an already-rendered section body in a native disclosure widget
+// instead of a plain <section>: the browser handles open/closed state,
+// keyboard toggling (Enter/Space) and the closed-by-default look for
+// free, with no client-side script. `open: true` renders it expanded;
+// omitting it (the default) renders collapsed — used for "Today's
+// Schedule" and "The Full Wire" per the user's request, and reusable for
+// any other section that should default to collapsed later.
+function renderCollapsibleSection(id, className, labelText, bodyHtml, { open = false } = {}) {
+  return `
+    <details id="${id}" class="${className} collapsible"${open ? " open" : ""}>
+      <summary class="label">${escapeHtml(labelText)}<span class="chevron" aria-hidden="true">&rsaquo;</span></summary>
+      ${bodyHtml}
+    </details>
+  `;
 }
 
 // ---------- headlines (snippet above the fold + full News section) ----------
@@ -130,14 +182,14 @@ function renderHeadlineList(headlines) {
   `;
 }
 
-function renderNewsSection(headlines) {
-  if (!headlines.length) {
-    return "";
-  }
-
+// Shared article markup for "The Full Wire" — used both collapsed, below
+// the fold (renderNewsSection, the in-season default), and expanded,
+// directly in the lead column (renderFullWireExpanded, offseason only —
+// see renderFrontPageHtml). Article ids use the "news-" prefix either way
+// so the lead column's jump links (#news-section, #news-0, ...) keep
+// working regardless of which form is on the page.
+function renderNewsArticles(headlines) {
   return `
-    <section id="news-section" class="news-section">
-      <div class="label">The Full Wire</div>
       <div class="news-articles">
         ${headlines
           .map(
@@ -152,6 +204,33 @@ function renderNewsSection(headlines) {
           )
           .join("")}
       </div>
+  `;
+}
+
+function renderNewsSection(headlines) {
+  if (!headlines.length) {
+    return "";
+  }
+
+  return renderCollapsibleSection("news-section", "news-section", "The Full Wire", renderNewsArticles(headlines));
+}
+
+// Offseason-only: there are no scores, standings, or leaderboards to fill
+// the lead column once the sidebar/box-scores/top-performances are hidden
+// (see isOffseason in renderFrontPageHtml), so instead of the short
+// "Today's Headlines" teaser list that jumps down to a collapsed Full Wire
+// section, show the full articles directly, already expanded, right in
+// the lead column. renderFrontPageHtml skips the separate renderNewsSection
+// call while isOffseason so the same articles aren't rendered twice.
+function renderFullWireExpanded(headlines) {
+  if (!headlines.length) {
+    return "";
+  }
+
+  return `
+    <section id="news-section" class="news-section">
+      <div class="label dark">The Full Wire</div>
+      ${renderNewsArticles(headlines)}
     </section>
   `;
 }
@@ -558,6 +637,11 @@ function renderLeadersSnippet(leaderboard) {
 // Matt Gropius as the section's sole voice, so the sidebar snippet was
 // dropped and this full section restyled to read like a single feature
 // article rather than a card grid — see the .opinion-article CSS below.
+//
+// The columnist's portrait floats beside the body text (classic newspaper
+// column treatment) instead of sitting in a byline row with a name/role
+// label — the section header ("Matt Gropius Hot Takes") already names the
+// columnist, so a repeated name/role line under the portrait was dropped.
 function renderOpinionSection(columns) {
   if (!columns.length) {
     return "";
@@ -571,14 +655,8 @@ function renderOpinionSection(columns) {
           .map(
             (column, index) => `
               <article id="opinion-${index}" class="opinion-article">
-                <div class="opinion-byline-row">
-                  <img class="opinion-avatar" src="columnists/${columnistSlug(column.author)}.png" alt="" loading="lazy" onerror="this.remove()">
-                  <div>
-                    <div class="opinion-name">${escapeHtml(column.author)}</div>
-                    ${column.role ? `<div class="opinion-role">${escapeHtml(column.role)}</div>` : ""}
-                  </div>
-                </div>
                 <h3>${escapeHtml(stripColumnistName(column.headline, column.author))}</h3>
+                <img class="opinion-avatar" src="columnists/${columnistSlug(column.author)}.png" alt="${escapeHtml(column.author)}" loading="lazy" onerror="this.remove()">
                 ${formatArticleBody(column.body)}
               </article>
             `,
@@ -598,7 +676,8 @@ function columnistSlug(name) {
 }
 
 // Column headlines are generated as "Author Name: Actual headline" — strip
-// that prefix since the byline underneath already names the columnist.
+// that prefix since the section header and portrait already identify the
+// columnist.
 function stripColumnistName(headline, author) {
   const text = String(headline ?? "").trim();
   const name = String(author ?? "").trim();
@@ -622,6 +701,15 @@ function renderBoxScores(games) {
     return "";
   }
 
+  // game.awayTeam/homeTeam (snapshotBuilder.mjs's parseScoreBlock) are
+  // scraped straight from OOTP's own line-score table, which already shows
+  // just the bare city name ("El Paso", "Sacramento") with no nickname —
+  // unlike the full "City Nickname" strings elsewhere (headlines, standings
+  // rows, transactions). Do NOT run these through shortenTeamName(): it
+  // assumes a trailing nickname word to strip and was chopping multi-word
+  // cities down to their first word ("El Paso" -> "El", "New Orleans" ->
+  // "New", "Fort Wayne" -> "Fort") since there was no nickname there to
+  // begin with.
   return `
     <section class="scores-strip">
       <div class="label">Last Night's Scores</div>
@@ -630,8 +718,8 @@ function renderBoxScores(games) {
           .map(
             (game) => `
               <div class="score-card">
-                <div class="score-line"><span>${escapeHtml(shortenTeamName(game.awayTeam))}</span><strong>${escapeHtml(game.awayRuns)}</strong></div>
-                <div class="score-line"><span>${escapeHtml(shortenTeamName(game.homeTeam))}</span><strong>${escapeHtml(game.homeRuns)}</strong></div>
+                <div class="score-line"><span>${escapeHtml(game.awayTeam)}</span><strong>${escapeHtml(game.awayRuns)}</strong></div>
+                <div class="score-line"><span>${escapeHtml(game.homeTeam)}</span><strong>${escapeHtml(game.homeRuns)}</strong></div>
                 <div class="score-meta">${escapeHtml(formatDecisionLine(game))}</div>
               </div>
             `,
@@ -653,6 +741,101 @@ function formatDecisionLine(game) {
     game.savePitcher ? `S: ${game.savePitcher}${game.savePitcherRecord ? ` (${game.savePitcherRecord})` : ""}` : "",
   ].filter(Boolean);
   return parts.join(" | ");
+}
+
+// ---------- top game performances (best individual box-score lines) ----------
+//
+// Another dormant-data case: snapshotBuilder.mjs already scrapes the
+// league's own "Top Game Performances" export into ranked batter/pitcher
+// lists (up to 5 each, OOTP's own composite "Score" rating decides the
+// order), but it was never wired into the page. Laid out Batting |
+// Pitching like the other split sections — current material (today's/
+// recent standout lines), so it stays expanded rather than collapsing.
+function renderTopGamePerformancesSection(topGamePerformancesFeature) {
+  const batters = topGamePerformancesFeature?.batters ?? [];
+  const pitchers = topGamePerformancesFeature?.pitchers ?? [];
+
+  if (!batters.length && !pitchers.length) {
+    return "";
+  }
+
+  const groups = [
+    { key: "batters", title: "Batting", rows: batters, render: renderTopBatterPerformanceTable },
+    { key: "pitchers", title: "Pitching", rows: pitchers, render: renderTopPitcherPerformanceTable },
+  ].filter((group) => group.rows.length);
+
+  return `
+    <section id="top-performances-section" class="top-performances-section">
+      <div class="label">Top Game Performances</div>
+      <div class="conference-grid" style="grid-template-columns: repeat(${groups.length}, 1fr);">
+        ${groups
+          .map(
+            (group) => `
+              <div class="conference-column">
+                <div class="conf-label">${escapeHtml(group.title)}</div>
+                ${group.render(group.rows)}
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+// row.team/row.opponent come back as full city names ("Fort Wayne", "New
+// Orleans"), the same as game.awayTeam/homeTeam in renderBoxScores above —
+// NOT short codes. Render them as-is; do not run them through teamCode()
+// or shortenTeamName(), which assume a different input shape and would
+// mangle a multi-word city down to a meaningless 3-letter slice.
+function topPerformanceNameCell(row) {
+  return `${escapeHtml(row.player)} &bull; ${escapeHtml(row.team)}`;
+}
+
+function renderTopBatterPerformanceTable(rows) {
+  return `
+    <table>
+      <tr><th class="text-left">Player</th><th class="text-left">Opp</th><th>Date</th><th>H</th><th>HR</th><th>RBI</th><th>Score</th></tr>
+      ${rows
+        .map(
+          (row) => `
+            <tr>
+              <td class="text-left">${topPerformanceNameCell(row)}</td>
+              <td class="text-left">${escapeHtml(row.opponent)}</td>
+              <td>${escapeHtml(formatMilestoneDate(row.date))}</td>
+              <td>${escapeHtml(row.hits)}</td>
+              <td>${escapeHtml(row.homeRuns)}</td>
+              <td>${escapeHtml(row.rbi)}</td>
+              <td class="value">${escapeHtml(row.score)}</td>
+            </tr>
+          `,
+        )
+        .join("")}
+    </table>
+  `;
+}
+
+function renderTopPitcherPerformanceTable(rows) {
+  return `
+    <table>
+      <tr><th class="text-left">Player</th><th class="text-left">Opp</th><th>Date</th><th>IP</th><th>ER</th><th>K</th><th>Score</th></tr>
+      ${rows
+        .map(
+          (row) => `
+            <tr>
+              <td class="text-left">${topPerformanceNameCell(row)}</td>
+              <td class="text-left">${escapeHtml(row.opponent)}</td>
+              <td>${escapeHtml(formatMilestoneDate(row.date))}</td>
+              <td>${escapeHtml(row.innings)}</td>
+              <td>${escapeHtml(row.earnedRuns)}</td>
+              <td>${escapeHtml(row.strikeouts)}</td>
+              <td class="value">${escapeHtml(row.score)}</td>
+            </tr>
+          `,
+        )
+        .join("")}
+    </table>
+  `;
 }
 
 // ---------- championship chase (the real ABA playoff bracket) ----------
@@ -683,7 +866,7 @@ function renderPlayoffRace(championshipChase) {
         ${renderFinalBracket(cc)}
         ${second ? renderConferenceBracket(second) : "<div></div>"}
       </div>
-      ${renderHuntRow(cc.conferences)}
+      ${cc.phase === "playoffs" ? "" : renderHuntRow(cc.conferences)}
     </section>
   `;
 }
@@ -732,10 +915,10 @@ function renderConferenceBracket(conference) {
   `;
 }
 
-function renderFinalBracket(cc) {
+function renderFinalBracket(cc, finalLabel = "ABA Final") {
   return `
     <div class="bracket-panel bracket-panel-final">
-      <div class="conf-label">ABA Final</div>
+      <div class="conf-label">${escapeHtml(finalLabel)}</div>
       <div class="round-label">${escapeHtml(cc.championshipSeriesLabel ?? "Championship Series")}</div>
       <div class="bracket">
         ${renderMatchupCard(cc.championshipMatchup ?? [], {})}
@@ -802,12 +985,23 @@ function renderMatchupSlot(entry, byePlaceholder) {
     return `<div class="bracket-team-empty">${escapeHtml(entry.placeholder)}</div>`;
   }
 
+  // Once a matchup is a live playoff series (entry.seriesWins is set by
+  // buildResolvedPlayoffMatchup/addDefaultSeriesWins in snapshotBuilder.mjs),
+  // the regular-season record/GB line is no longer the useful number —
+  // the series win count is. Swap to that, with a status suffix once the
+  // series is decided, and only then; a projected/regular-season slot
+  // (no seriesWins at all) keeps showing record/GB exactly as before.
+  const hasSeriesProgress = entry.seriesWins !== undefined && entry.seriesWins !== null && entry.seriesWins !== "";
+  const metaLine = hasSeriesProgress
+    ? `${escapeHtml(entry.seriesWins)} win${entry.seriesWins === "1" ? "" : "s"}${entry.advanced ? " &bull; Won Series" : entry.eliminated ? " &bull; Eliminated" : ""}`
+    : `${escapeHtml(entry.record ?? "")}${entry.gb && entry.gb !== "-" ? ` &bull; ${escapeHtml(entry.gb)} GB` : ""}`;
+
   return `
     <div class="bracket-team">
       <img class="team-logo" src="${escapeHtml(logoRelativePath(entry.logoUrl))}" alt="" loading="lazy" onerror="this.remove()">
       <div class="bracket-team-info">
         <div class="bracket-team-name">${entry.seed ? `<span class="dim small">#${escapeHtml(entry.seed)}</span> ` : ""}${escapeHtml(shortenTeamName(entry.team))}</div>
-        <div class="bracket-team-meta">${escapeHtml(entry.record ?? "")}${entry.gb && entry.gb !== "-" ? ` &bull; ${escapeHtml(entry.gb)} GB` : ""}</div>
+        <div class="bracket-team-meta">${metaLine}</div>
       </div>
     </div>
   `;
@@ -828,7 +1022,7 @@ function formatGb(gb) {
 
 // ---------- pennant races (full standings) ----------
 
-function renderPennantRaces(sections) {
+function renderPennantRaces(sections, showMagicNumber) {
   if (!sections.length) {
     return "";
   }
@@ -846,7 +1040,7 @@ function renderPennantRaces(sections) {
               <div class="conference-column">
                 <div class="conf-label">Conference ${escapeHtml(titleCase(key))}</div>
                 <div class="division-stack">
-                  ${byConference[key].map(renderStandingsTable).join("")}
+                  ${byConference[key].map((section) => renderStandingsTable(section, showMagicNumber)).join("")}
                 </div>
               </div>
             `,
@@ -857,12 +1051,18 @@ function renderPennantRaces(sections) {
   `;
 }
 
-function renderStandingsTable(section) {
+// The standings data already carries OOTP's own "M#" (Magic Number)
+// column (snapshotBuilder.mjs's buildStandingsSections), but showing it
+// from Opening Day is meaningless — every team's number just sits near
+// the full season length until a race actually narrows. isLateSeason()
+// (below) gates the column so it only appears once the season is far
+// enough along for the number to mean something.
+function renderStandingsTable(section, showMagicNumber) {
   return `
     <div class="division-block">
       <span class="sublabel">${escapeHtml(titleCase(section.label))}</span>
       <table>
-        <tr><th>Team</th><th>W</th><th>L</th><th>GB</th><th>L10</th><th>Strk</th></tr>
+        <tr><th>Team</th><th>W</th><th>L</th><th>GB</th><th>L10</th><th>Strk</th>${showMagicNumber ? `<th>M#</th>` : ""}</tr>
         ${section.rows
           .map(
             (row) => `
@@ -873,6 +1073,7 @@ function renderStandingsTable(section) {
                 <td>${escapeHtml(row.GB)}</td>
                 <td>${escapeHtml(row.L10 ?? "")}</td>
                 <td>${escapeHtml(row.Strk ?? "")}</td>
+                ${showMagicNumber ? `<td>${escapeHtml(row["M#"] ?? "")}</td>` : ""}
               </tr>
             `,
           )
@@ -880,6 +1081,21 @@ function renderStandingsTable(section) {
       </table>
     </div>
   `;
+}
+
+// "Late season" = the team that's played the most games has reached
+// LATE_SEASON_PROGRESS of the full regular-season schedule
+// (config.regularSeasonGames — see config.mjs). Using games played rather
+// than a calendar date keeps this correct even if a team's games get
+// rained out/rescheduled, and keeps it portable to any league-config.json
+// with a different season length. Missing/zero regularSeasonGames (an
+// older config that predates this field) fails safe to "not late season"
+// rather than guessing. The actual check now lives in
+// src/lib/seasonProgress.mjs so the columnist engines (columnFactory.mjs,
+// aiColumnFactory.mjs) can share it — see that file for isOutOfContention,
+// the same idea applied to a single team instead of the whole league.
+function isLateSeason(standingsSections, config) {
+  return isLateSeasonShared(standingsSections, config?.regularSeasonGames);
 }
 
 // ---------- league leaders (full batting + pitching leaderboards) ----------
@@ -932,6 +1148,363 @@ function renderLeaderboardTable(leaderboard) {
           .join("")}
       </table>
     </div>
+  `;
+}
+
+// ---------- historical (all-time) statistical leaders ----------
+//
+// snapshotBuilder.mjs has always computed two separate career-leader
+// features alongside the current-season leaderboards above —
+// leagueCareerLeaders (the league's full all-time record book) and
+// teamCareerLeaders (one franchise's own all-time leaders, picked the
+// same stable-daily-pick way as the Team Highlight/Prospect Highlight
+// panels) — but like Team Highlights and the Player Interview before
+// them, neither was ever wired into the page; see design-prototypes.md
+// for why ("career leaders" was explicitly deferred, separately from
+// the still-unbuilt positional-rankings feature). Both reuse the same
+// {label, entries:[{player, value}]} shape as the current-season
+// leaderboards, just without a per-entry team — career totals can span
+// multiple teams for a league leader, and are redundant for a
+// single-franchise leader — so this mirrors renderLeadersSection's
+// layout rather than inventing a new one.
+function renderHistoricalLeadersSection(leagueCareerLeaders, teamCareerLeaders) {
+  const leagueGroup = leagueCareerLeaders
+    ? renderCareerLeaderboardGroup(leagueCareerLeaders.battingLeaderboards ?? [], leagueCareerLeaders.pitchingLeaderboards ?? [])
+    : "";
+  const teamGroup = teamCareerLeaders
+    ? renderCareerLeaderboardGroup(teamCareerLeaders.battingLeaderboards ?? [], teamCareerLeaders.pitchingLeaderboards ?? [])
+    : "";
+
+  if (!leagueGroup && !teamGroup) {
+    return "";
+  }
+
+  const leagueTitle = leagueCareerLeaders?.leagueName ? `${leagueCareerLeaders.leagueName} — All-Time Leaders` : "All-Time Leaders";
+  const teamTitle = teamCareerLeaders?.teamName ? `${teamCareerLeaders.teamName} — Franchise Leaders` : "";
+
+  const body = `
+      ${
+        leagueGroup
+          ? `
+            <div class="historical-leaders-group">
+              <div class="group-label">${escapeHtml(leagueTitle)}</div>
+              ${leagueGroup}
+            </div>
+          `
+          : ""
+      }
+      ${
+        teamGroup
+          ? `
+            <div class="historical-leaders-group">
+              <div class="group-label">${escapeHtml(teamTitle)}</div>
+              ${teamGroup}
+            </div>
+          `
+          : ""
+      }
+  `;
+
+  // Collapsed by default, same as "Today's Schedule" and "The Full Wire" —
+  // this is reference material most readers won't open every day.
+  return renderCollapsibleSection("historical-leaders-section", "historical-leaders-section", "Historical Leaders", body);
+}
+
+function renderCareerLeaderboardGroup(battingLeaderboards, pitchingLeaderboards) {
+  const groups = [
+    { key: "batting", title: "Batting", boards: battingLeaderboards },
+    { key: "pitching", title: "Pitching", boards: pitchingLeaderboards },
+  ].filter((group) => group.boards.length);
+
+  if (!groups.length) {
+    return "";
+  }
+
+  return `
+    <div class="conference-grid" style="grid-template-columns: repeat(${groups.length}, 1fr);">
+      ${groups
+        .map(
+          (group) => `
+            <div class="conference-column">
+              <div class="conf-label">${escapeHtml(group.title)}</div>
+              <div class="leaders-stack">
+                ${group.boards.map(renderCareerLeaderboardTable).join("")}
+              </div>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderCareerLeaderboardTable(leaderboard) {
+  return `
+    <div class="division-block">
+      <span class="sublabel">${escapeHtml(leaderboard.label)}</span>
+      <table>
+        ${leaderboard.entries
+          .slice(0, 5)
+          .map(
+            (entry) => `
+              <tr>
+                <td>${escapeHtml(entry.player)}</td>
+                <td class="value">${escapeHtml(entry.value)}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </div>
+  `;
+}
+
+// ---------- positional rankings (all-time position record book) ----------
+//
+// Companion to the Historical Leaders section above, built from the same
+// dormant career-leader data snapshotBuilder.mjs already computes:
+// positionCareerLeaderboard picks one position (stably, once per day,
+// the same pickStableIndex pattern as the Team/Prospect Highlight
+// panels) and finds the single #1 record-holder at that position — not
+// a top-N list like the other leaderboards — across four splits: best
+// single season, best career total, best single postseason, and best
+// career postseason total. Postseason splits are frequently sparse (not
+// every category/position pairing has a postseason record on file), so
+// each split — and each category row within it — only renders when real
+// data came back for it.
+function renderPositionalRankingsSection(positionCareerLeaderboard) {
+  if (!positionCareerLeaderboard) {
+    return "";
+  }
+
+  const splits = [
+    { key: "singleSeason", title: "Single Season", rows: positionCareerLeaderboard.singleSeason },
+    { key: "career", title: "Career", rows: positionCareerLeaderboard.career },
+    { key: "singlePostseason", title: "Single Postseason", rows: positionCareerLeaderboard.singlePostseason },
+    { key: "postseasonCareer", title: "Postseason Career", rows: positionCareerLeaderboard.postseasonCareer },
+  ]
+    .map((split) => ({ ...split, rows: (split.rows ?? []).filter((row) => row.player) }))
+    .filter((split) => split.rows.length);
+
+  if (!splits.length) {
+    return "";
+  }
+
+  const title = positionCareerLeaderboard.positionTitle
+    ? `All-Time ${positionCareerLeaderboard.positionTitle} Records`
+    : "All-Time Positional Records";
+
+  const body = `
+      <div class="group-label">${escapeHtml(title)}</div>
+      <div class="conference-grid" style="grid-template-columns: repeat(${Math.min(splits.length, 2)}, 1fr);">
+        ${splits.map(renderPositionalSplitTable).join("")}
+      </div>
+  `;
+
+  // Collapsed by default, same reference-material treatment as Historical
+  // Leaders right above it. Labeled "All-Time Positional Records" (not
+  // "Positional Rankings") to leave that name free for the current-season
+  // positional strength spotlight — a different, current-season feature —
+  // below.
+  return renderCollapsibleSection("positional-rankings-section", "positional-rankings-section", "All-Time Positional Records", body);
+}
+
+// ---------- positional spotlight (current-season positional strength) ----------
+//
+// Another dormant-data case: snapshotBuilder.mjs's positionalStrengthFeature
+// already picks one position (stably, once per day, the same
+// pickStableIndex pattern as the other featured panels) from the league's
+// own Positional Strength report and ranks every team's best player at
+// that position league-wide (1st = the league's best). This is current-
+// season content, not a record book, so — like Leaders and Top Game
+// Performances — it stays expanded rather than collapsing.
+function renderPositionalStrengthSection(positionalStrengthFeature) {
+  const players = positionalStrengthFeature?.players ?? [];
+  if (!players.length) {
+    return "";
+  }
+
+  const position = positionalStrengthFeature.position || "Players";
+
+  return `
+    <section id="positional-strength-section" class="positional-strength-section">
+      <div class="label">Positional Rankings</div>
+      <div class="group-label">Best ${escapeHtml(position)}</div>
+      <table>
+        <tr><th>Rk</th><th class="text-left">Player</th><th class="text-left">Team</th><th>Age</th><th class="text-left">Salary</th></tr>
+        ${players
+          .map(
+            (entry) => `
+              <tr>
+                <td>${escapeHtml(entry.rank)}</td>
+                <td class="text-left">${escapeHtml(entry.player)}</td>
+                <td class="text-left">${escapeHtml(entry.team)}</td>
+                <td>${escapeHtml(entry.age || "—")}</td>
+                <td class="text-left">${escapeHtml(entry.salary || "—")}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </section>
+  `;
+}
+
+function renderPositionalSplitTable(split) {
+  return `
+    <div class="conference-column">
+      <div class="conf-label">${escapeHtml(split.title)}</div>
+      <table>
+        <tr><th class="text-left">Category</th><th class="text-left">Player</th><th>Value</th><th>Year</th></tr>
+        ${split.rows
+          .map(
+            (row) => `
+              <tr>
+                <td class="text-left">${escapeHtml(row.label)}</td>
+                <td class="text-left">${escapeHtml(row.player)}</td>
+                <td class="value">${escapeHtml(row.value)}</td>
+                <td>${escapeHtml(row.year)}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+    </div>
+  `;
+}
+
+// ---------- number one picks (one random team's draft history) ----------
+//
+// Another dormant-data case: snapshotBuilder.mjs already picks one team
+// (stably, once per day, the same pickStableIndex pattern as the other
+// featured panels) and scrapes its own draft-history page for its top
+// pick each year, newest first. Historical/reference material like
+// Historical Leaders and Positional Rankings, so it sits alongside them
+// and collapses the same way.
+function renderNumberOnePicksSection(numberOnePicksFeature) {
+  const picks = numberOnePicksFeature?.picks ?? [];
+  if (!picks.length) {
+    return "";
+  }
+
+  // teamName comes back from OOTP's own page title, which is all caps
+  // ("ALBUQUERQUE ISOTOPES") — title-case it so it reads like every other
+  // team name on the page instead of shouting.
+  const teamName = titleCase(numberOnePicksFeature.teamName ?? "");
+
+  const body = `
+      <div class="group-label">${escapeHtml(teamName)} — Draft History</div>
+      <table>
+        <tr><th>Year</th><th class="text-left">Player</th><th class="text-left">Pos</th><th class="text-left">Current Team</th></tr>
+        ${picks
+          .map(
+            (pick) => `
+              <tr>
+                <td>${escapeHtml(pick.year)}</td>
+                <td class="text-left">${escapeHtml(pick.player)}${pick.didNotSign ? ' <span class="pick-no-sign">(Did Not Sign)</span>' : ""}</td>
+                <td class="text-left">${escapeHtml(pick.position)}</td>
+                <td class="text-left">${escapeHtml(pick.currentTeam || "—")}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
+  `;
+
+  return renderCollapsibleSection("number-one-picks-section", "number-one-picks-section", "Number One Picks", body);
+}
+
+// ---------- next free agents ----------
+//
+// Another dormant-data case: snapshotBuilder.mjs already scrapes OOTP's
+// own "upcoming free agents" export (separate batter/pitcher pages) into
+// one combined, score-sorted list, but it was never wired into the page.
+// The combined list interleaves the two types but keeps each type's own
+// relative (score) order, so filtering back into batters/pitchers here
+// restores the original per-type ranking — then laid out Batting |
+// Pitching like the leaders sections elsewhere on the page. Unlike
+// Historical Leaders/Positional Rankings, this is current roster news
+// (who's about to be available), not a record book, so it stays expanded
+// like Prospect Watch and Milestones rather than collapsing by default.
+function renderFreeAgentsSection(upcomingFreeAgents) {
+  const batters = (upcomingFreeAgents ?? []).filter((player) => player.type === "batter");
+  const pitchers = (upcomingFreeAgents ?? []).filter((player) => player.type === "pitcher");
+
+  if (!batters.length && !pitchers.length) {
+    return "";
+  }
+
+  const groups = [
+    { key: "batters", title: "Position Players", players: batters, render: renderFreeAgentBatterTable },
+    { key: "pitchers", title: "Pitchers", players: pitchers, render: renderFreeAgentPitcherTable },
+  ].filter((group) => group.players.length);
+
+  return `
+    <section id="free-agents-section" class="free-agents-section">
+      <div class="label">Next Free Agents</div>
+      <div class="conference-grid" style="grid-template-columns: repeat(${groups.length}, 1fr);">
+        ${groups
+          .map(
+            (group) => `
+              <div class="conference-column">
+                <div class="conf-label">${escapeHtml(group.title)}</div>
+                ${group.render(group.players)}
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function freeAgentNameCell(player) {
+  return `${escapeHtml(player.name)}${player.isMinorLeagueFreeAgent ? ' <span class="dim small">(ML)</span>' : ""}`;
+}
+
+function renderFreeAgentBatterTable(players) {
+  return `
+    <table>
+      <tr><th class="text-left">Player</th><th>Team</th><th>Age</th><th>Pos</th><th>CON</th><th>POW</th><th>EYE</th></tr>
+      ${players
+        .map(
+          (player) => `
+            <tr>
+              <td class="text-left">${freeAgentNameCell(player)}</td>
+              <td>${escapeHtml(player.team)}</td>
+              <td>${escapeHtml(player.age)}</td>
+              <td>${escapeHtml(player.pos)}</td>
+              <td>${escapeHtml(player.contact)}</td>
+              <td>${escapeHtml(player.power)}</td>
+              <td>${escapeHtml(player.eye)}</td>
+            </tr>
+          `,
+        )
+        .join("")}
+    </table>
+  `;
+}
+
+function renderFreeAgentPitcherTable(players) {
+  return `
+    <table>
+      <tr><th class="text-left">Player</th><th>Team</th><th>Age</th><th>Role</th><th>Stuff</th><th>Mvt</th><th>Ctrl</th></tr>
+      ${players
+        .map(
+          (player) => `
+            <tr>
+              <td class="text-left">${freeAgentNameCell(player)}</td>
+              <td>${escapeHtml(player.team)}</td>
+              <td>${escapeHtml(player.age)}</td>
+              <td>${escapeHtml(player.pos)}</td>
+              <td>${escapeHtml(player.stuff)}</td>
+              <td>${escapeHtml(player.movement)}</td>
+              <td>${escapeHtml(player.control)}</td>
+            </tr>
+          `,
+        )
+        .join("")}
+    </table>
   `;
 }
 
@@ -1053,14 +1626,13 @@ function renderSchedule(games) {
     return "";
   }
 
-  return `
-    <section id="schedule" class="schedule-section">
-      <div class="label">Today's Schedule</div>
+  const body = `
       <div class="schedule-grid">
         ${games.map(renderScheduleCard).join("")}
       </div>
-    </section>
   `;
+
+  return renderCollapsibleSection("schedule", "schedule-section", "Today's Schedule", body);
 }
 
 function renderScheduleCard(game) {
@@ -1171,7 +1743,6 @@ function renderProspectHighlight(prospect) {
       ${
         stats.length
           ? `
-            <span class="sublabel">This Season</span>
             <div class="prospect-stats">
               ${stats.map(([label, value]) => `<div class="prospect-stat"><span class="stat-value">${escapeHtml(value)}</span><span class="stat-label">${escapeHtml(label)}</span></div>`).join("")}
             </div>
@@ -1334,7 +1905,6 @@ function renderCoachHighlightPanel(manager) {
       ${
         stats.length
           ? `
-            <span class="sublabel">Career</span>
             <div class="prospect-stats">
               ${stats.map(([label, value]) => `<div class="prospect-stat"><span class="stat-value">${escapeHtml(value)}</span><span class="stat-label">${escapeHtml(label)}</span></div>`).join("")}
             </div>
@@ -1346,6 +1916,36 @@ function renderCoachHighlightPanel(manager) {
           ? manager.summary.map((line) => `<p class="prospect-line">${escapeHtml(line)}</p>`).join("")
           : ""
       }
+      ${manager.careerHistory?.length ? renderCoachCareerHistoryTable(manager.careerHistory) : ""}
+    </div>
+  `;
+}
+
+// Season-by-season record straight from the coach's own OOTP history
+// table (snapshotBuilder.mjs already scraped it in full — careerRecord/
+// careerSeasons/playoffAppearances/championships above are just a sum of
+// these same rows) — same "snippet above, full table below" idea used
+// elsewhere on the page, just scaled down to panel size. Newest year
+// first, matching how careerHistory is already sorted.
+function renderCoachCareerHistoryTable(careerHistory) {
+  return `
+    <div class="prospect-team-block">
+      <span class="sublabel">Career History</span>
+      <table class="prospect-team-table">
+        <tr><th>Year</th><th class="text-left">Team</th><th>Record</th><th class="text-left">Playoffs</th></tr>
+        ${careerHistory
+          .map(
+            (row) => `
+              <tr>
+                <td>${escapeHtml(row.year)}</td>
+                <td class="text-left">${escapeHtml(row.team)}</td>
+                <td class="value">${escapeHtml(row.record)}</td>
+                <td class="text-left">${escapeHtml(row.playoffs && row.playoffs !== "-" ? row.playoffs : "—")}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </table>
     </div>
   `;
 }
@@ -1512,7 +2112,8 @@ function renderMinorLeaguesSection(minorLeagues) {
       ((league.headlines ?? []).length ||
         (league.standingsSections ?? []).length ||
         (league.battingLeaderboards ?? []).length ||
-        (league.pitchingLeaderboards ?? []).length),
+        (league.pitchingLeaderboards ?? []).length ||
+        (league.championshipChase?.phase === "playoffs" && league.championshipChase?.conferences?.length)),
   );
 
   if (!leagues.length) {
@@ -1539,8 +2140,46 @@ function renderMinorLeaguePanel(league) {
     <div class="minor-league-panel">
       <div class="conf-label">${escapeHtml(league.leagueName ?? "Minor League")}</div>
       ${renderMinorLeagueNews(league.headlines ?? [])}
-      ${renderMinorLeagueStandings(league.standingsSections ?? [])}
+      ${renderMinorLeaguePlayoffBracket(league.championshipChase, league.leagueName)}
+      ${
+        league.currentMode === "OFFSEASON" || league.championshipChase?.phase === "playoffs"
+          ? ""
+          : renderMinorLeagueStandings(league.standingsSections ?? [])
+      }
       ${renderMinorLeagueLeaders(league.battingLeaderboards ?? [], league.pitchingLeaderboards ?? [])}
+    </div>
+  `;
+}
+
+// snapshotBuilder.mjs already computes a full championshipChase for the
+// minor league (same buildChampionshipChase the majors' Championship Chase
+// section uses, just with the Frontier League's own division/wildcard
+// counts, series lengths, and — the thing that actually detects the
+// playoffs — its own playoffTextIndicators regexes matched against this
+// league's news pages). It just never got rendered anywhere. Only show it
+// once phase is actually "playoffs" (i.e. those news indicators fired) —
+// unlike the majors' section, which shows a projected bracket all season,
+// the minor-league report stays a quick glance until there's an actual
+// bracket worth showing. Reuses the exact same bracket building blocks
+// (logos, series win counts, round labels) as the Championship Chase
+// section above for visual consistency.
+function renderMinorLeaguePlayoffBracket(championshipChase, leagueName) {
+  const cc = championshipChase;
+  if (!cc || cc.phase !== "playoffs" || !cc.conferences?.length) {
+    return "";
+  }
+
+  const [first, second] = cc.conferences;
+  const finalLabel = `${leagueName || "League"} Final`;
+
+  return `
+    <div class="minor-league-block">
+      <span class="sublabel">${escapeHtml(cc.title ?? "Playoff Bracket")}</span>
+      <div class="bracket-grid minor-bracket-grid">
+        ${first ? renderConferenceBracket(first) : "<div></div>"}
+        ${renderFinalBracket(cc, finalLabel)}
+        ${second ? renderConferenceBracket(second) : "<div></div>"}
+      </div>
     </div>
   `;
 }
@@ -1841,11 +2480,12 @@ const pageStyles = `
   .masthead h1{margin:0; font-size:clamp(42px, 7.5vw, 80px); font-weight:600; letter-spacing:-0.01em;}
   .masthead-meta{display:flex; justify-content:space-between; margin-top:16px; font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--ink-soft);}
   .main-grid{display:grid; grid-template-columns: 2fr 1fr; gap:48px; padding:36px 32px 0 32px;}
+  .main-grid.main-grid-solo{grid-template-columns: 1fr;}
   @media (max-width: 860px){ .main-grid{grid-template-columns: 1fr;} }
   .lead-column{display:flex; flex-direction:column; gap:32px;}
   .tag{display:inline-block; background:var(--green); color:#fff; font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; padding:4px 10px; margin-bottom:12px;}
   .dateline{font-family:"IBM Plex Sans",sans-serif; font-size:12px; color:var(--ink-soft); letter-spacing:.04em; margin-bottom:12px;}
-  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label, .minor-leagues-section > .label, .interview-section > .label, .team-highlight-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
+  .news-snippet .label, .news-section > .label, .opinion-section > .label, .leaders-section > .label, .wire-column .label, .playoff-section > .label, .schedule-section > .label, .prospects-section > .label, .milestones-section > .label, .minor-leagues-section > .label, .interview-section > .label, .team-highlight-section > .label, .historical-leaders-section > .label, .positional-rankings-section > .label, .free-agents-section > .label, .top-performances-section > .label, .number-one-picks-section > .label, .positional-strength-section > .label{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.12em; font-weight:700; text-transform:uppercase; color:var(--ink); border-bottom:2px solid var(--ink); padding-bottom:6px; display:inline-block;}
   .headline-list{list-style:none; margin:14px 0 0 0; padding:0; display:flex; flex-direction:column;}
   .headline-list li{padding:14px 0; border-bottom:1px solid var(--rule);}
   .headline-list li:first-child{padding-top:0;}
@@ -1871,10 +2511,24 @@ const pageStyles = `
   td.value{font-weight:600;}
   .byline{font-family:"IBM Plex Sans",sans-serif; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); margin-top:4px;}
   .scores-strip{padding:32px 32px 0 32px;}
+  .top-performances-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
+  .positional-strength-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
+  .positional-strength-section > .group-label{margin-top:20px;}
   .scores-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(230px,1fr)); gap:14px; margin-top:14px;}
   .score-card{border:1px solid var(--rule); padding:12px; font-family:"IBM Plex Sans",sans-serif; font-size:13px;}
   .score-line{display:flex; justify-content:space-between;}
   .score-meta{color:var(--ink-soft); font-size:11px; margin-top:8px; line-height:1.5;}
+  /* Collapsible sections (native <details>/<summary> — see
+     renderCollapsibleSection). Closed by default; clicking the header bar
+     (or Enter/Space when it's focused) reveals the body via the browser's
+     own disclosure behavior — no JS involved. The label keeps all of the
+     shared .label styling above (uppercase, underline, etc.) and this
+     just adds the full-width clickable bar and the chevron. */
+  .collapsible > summary.label{cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:12px; user-select:none; list-style:none;}
+  .collapsible > summary.label::-webkit-details-marker{display:none;}
+  .collapsible > summary.label:hover{color:var(--green);}
+  .collapsible > summary.label .chevron{font-size:18px; font-weight:700; color:var(--ink-soft); transition:transform .15s ease;}
+  .collapsible[open] > summary.label .chevron{transform:rotate(90deg);}
   .news-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
   .news-articles{display:flex; flex-direction:column; gap:8px; margin-top:20px;}
   .news-article{padding-bottom:32px; margin-bottom:32px; border-bottom:1px solid var(--rule);}
@@ -1892,6 +2546,21 @@ const pageStyles = `
   .sublabel{font-family:"IBM Plex Sans",sans-serif; font-size:11.5px; letter-spacing:.08em; font-weight:700; text-transform:uppercase; color:var(--green); display:block;}
   .leaders-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
   .leaders-stack{display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:20px 24px; align-items:start;}
+  .historical-leaders-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
+  .historical-leaders-group{margin-top:24px;}
+  .historical-leaders-group:first-of-type{margin-top:20px;}
+  .group-label{font-family:"Newsreader",serif; font-size:19px; font-weight:600; color:var(--ink); border-bottom:1px solid var(--green); padding-bottom:8px; margin-bottom:18px;}
+  .positional-rankings-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
+  /* Historical Leaders' .group-label gets its top spacing from the
+     .historical-leaders-group wrapper around it; Positional Rankings has
+     only one group-label and renders it as the body's first element with
+     no such wrapper, so it needs its own margin-top here or it sits
+     flush against the summary bar above it. */
+  .positional-rankings-section > .group-label{margin-top:20px;}
+  .number-one-picks-section{margin-top:48px; padding:32px 32px 0 32px; border-top:1px solid var(--ink);}
+  .number-one-picks-section > .group-label{margin-top:20px;}
+  .pick-no-sign{color:var(--ink-soft); font-style:italic; font-size:11.5px; margin-left:4px;}
+  .free-agents-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .playoff-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .playoff-meta{font-family:"IBM Plex Sans",sans-serif; font-size:12px; letter-spacing:.04em; color:var(--ink-soft); margin-top:8px;}
   .bracket-grid{display:grid; grid-template-columns:1.3fr 1fr 1.3fr; gap:24px; margin-top:24px; align-items:start;}
@@ -1977,6 +2646,8 @@ const pageStyles = `
   .minor-news-list li{display:flex; justify-content:space-between; align-items:baseline; gap:16px; padding:7px 0; border-bottom:1px solid var(--rule); font-family:"IBM Plex Sans",sans-serif; font-size:12.5px;}
   .minor-news-list li:last-child{border-bottom:none; padding-bottom:0;}
   .minor-news-title{color:var(--ink);}
+  .minor-bracket-grid{margin-top:12px; gap:16px;}
+  .minor-bracket-grid .bracket-panel{padding:14px;}
   .minor-standings-grid{display:grid; gap:20px; margin-top:8px;}
   @media (max-width: 700px){ .minor-standings-grid{grid-template-columns:1fr !important;} }
   .minor-standings-column{display:flex; flex-direction:column; gap:12px;}
@@ -1997,18 +2668,23 @@ const pageStyles = `
   /* Reads as a feature article rather than a card grid, matching
      .news-article's readable-body treatment below — appropriate now that
      the section is normally a single columnist rather than a multi-card
-     comparison (see the note above renderOpinionSection). */
+     comparison (see the note above renderOpinionSection). max-width lives
+     on the article itself (not just the paragraphs) so the headline and
+     the body share one reading width instead of the headline stretching
+     to the full section width while the text below it stays narrow. */
   .opinion-articles{display:flex; flex-direction:column; gap:8px; margin-top:20px;}
-  .opinion-article{padding-bottom:32px; margin-bottom:32px; border-bottom:1px solid var(--rule);}
+  .opinion-article{max-width:760px; padding-bottom:32px; margin-bottom:32px; border-bottom:1px solid var(--rule);}
   .opinion-article:last-child{border-bottom:none; margin-bottom:0; padding-bottom:0;}
-  .opinion-byline-row{display:flex; align-items:center; gap:10px; margin-bottom:16px;}
-  .opinion-avatar{width:42px; height:42px; border-radius:50%; object-fit:cover; border:1px solid var(--rule); flex-shrink:0;}
-  .opinion-name{font-family:"IBM Plex Sans",sans-serif; font-size:12.5px; font-weight:700; color:var(--ink);}
-  .opinion-role{font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; color:var(--ink-soft); margin-top:1px;}
-  .opinion-article h3{margin:0 0 6px 0; font-size:clamp(22px,3vw,30px); font-weight:600; line-height:1.15;}
-  .opinion-article p{font-size:15px; line-height:1.6; margin:0 0 14px 0; max-width:760px;}
+  .opinion-article::after{content:""; display:block; clear:both;}
+  .opinion-article h3{margin:0 0 12px 0; font-size:clamp(22px,3vw,30px); font-weight:600; line-height:1.15;}
+  /* Portrait floats beside the body text instead of sitting in a byline
+     row with a name/role label (removed — the section header already
+     names the columnist); the paragraphs after it wrap around it via
+     ordinary float layout. */
+  .opinion-avatar{float:left; width:120px; height:120px; border-radius:50%; object-fit:cover; border:1px solid var(--rule); margin:2px 24px 12px 0;}
+  .opinion-article p{font-size:15px; line-height:1.6; margin:0 0 14px 0;}
   .opinion-article p:last-child{margin-bottom:0;}
-  .opinion-article .article-list{font-size:15px; line-height:1.6; max-width:760px;}
+  .opinion-article .article-list{font-size:15px; line-height:1.6;}
   .wire-section{margin-top:48px; padding:32px 32px 40px 32px; border-top:1px solid var(--ink);}
   .wire-grid{display:grid; grid-template-columns:1fr 1fr; gap:40px; margin-top:20px;}
   @media (max-width: 700px){ .wire-grid{grid-template-columns:1fr;} }

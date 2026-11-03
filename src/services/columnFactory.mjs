@@ -8,6 +8,8 @@ import {
   getLastCompletedSeason,
   summarizeTeamLegacy,
 } from "./historyContext.mjs";
+import { isLateSeason, isOutOfContention } from "../lib/seasonProgress.mjs";
+import { buildOffseasonDigest, formatMoney, teamsWithNotableActivity } from "../lib/offseasonDigest.mjs";
 
 let currentSnapshotRef = null;
 
@@ -2126,7 +2128,255 @@ function pickStableIndexForColumns(seedKey, count) {
   return Math.abs(hash) % count;
 }
 
+// Matt Gropius's five offseason topics. Only ever reached while
+// snapshot.currentMode === "OFFSEASON" (see buildMattCandidates below).
+// Each builder returns null when it does not have enough real data to say
+// something grounded — buildMattCandidates then just works with whichever
+// of the five actually came back, and the existing topic-rotation logic in
+// pickMattTopic (topicKey/targetKey, avoiding yesterday's pick) handles
+// picking among them day to day, the same as every other columnist topic
+// pool in this file.
+function buildMattOffseasonCandidates(snapshot) {
+  if (snapshot?.currentMode !== "OFFSEASON") {
+    return [];
+  }
+
+  const digest = buildOffseasonDigest(snapshot.transactions ?? []);
+
+  return [
+    buildMattBigSigningCandidate(digest),
+    buildMattTeamOffseasonRecapCandidate(digest),
+    buildMattDivisionPredictionCandidate(snapshot, digest),
+    buildMattBestOffseasonTeamsCandidate(digest),
+    buildMattWorstOffseasonTeamsCandidate(digest),
+  ].filter(Boolean);
+}
+
+// Topic 1: a big signing (or extension), if one exists in the current
+// transaction window, and what it means for the team that made it.
+function buildMattBigSigningCandidate(digest) {
+  const signing = digest.bigMoves[0];
+  if (!signing) {
+    return null;
+  }
+
+  const { team, player, position, years, totalValue, type } = signing;
+  const amount = formatMoney(totalValue);
+  const dealWord = type === "extension" ? "extension" : "deal";
+  const yearsLabel = `${years}-year`;
+
+  const motiveVariants = [
+    `The easy read is that ${player} just took the bigger number, but I have watched enough of these over the years to know it is usually about the depth chart too — ${team} offered a real role to go with the real money, and that combination is what actually moves a ${position} off the open market.`,
+    `I do not buy that this was only about ${amount}. A ${position} with real options takes the offer that tells him exactly where he fits on the roster, and ${team} apparently made that case louder than anyone else in the room.`,
+    `Players talk to other players, and the word on a ${yearsLabel} commitment like this one is simple: ${team} told ${player} he is the answer, not an insurance policy. That is worth more than the guarantee itself some winters.`,
+  ];
+  const impactVariants = [
+    `For ${team}, the roster math changes today, not next summer — that is a lineup spot or a rotation turn settled before camp even opens, and it frees the front office to spend the rest of the winter patching smaller holes instead of chasing one more name.`,
+    `What it means for ${team} is fewer decisions left on the board. One ${dealWord} like this takes a whole position off the offseason to-do list, and that kind of head start tends to show up in April, not February.`,
+  ];
+  const motive = motiveVariants[pickStableIndexForColumns(`matt-offseason-signing-motive:${player}`, motiveVariants.length)];
+  const impact = impactVariants[pickStableIndexForColumns(`matt-offseason-signing-impact:${player}`, impactVariants.length)];
+
+  const body = `${team} did not wait around this winter. The move turning heads right now is ${player}, a ${position}, landing a ${yearsLabel} contract worth a total of ${amount}.
+
+${motive}
+
+${impact}
+
+If you want the ex-player read, here it is: this is the kind of ${dealWord} a team makes when it believes its own timeline, not when it is just filling a roster spot.`;
+
+  return {
+    headline: `Matt Gropius: ${team} Just Changed Their Winter`,
+    body,
+    topicKey: "matt:offseason:big-signing",
+    targetKey: `offseason-signing:${player}`,
+  };
+}
+
+// Topic 2: one team's full offseason — signings, departures, trades — and
+// Matt's read on what it adds up to for next season.
+function buildMattTeamOffseasonRecapCandidate(digest) {
+  const teams = teamsWithNotableActivity(digest).sort((left, right) => left.team.localeCompare(right.team));
+  if (!teams.length) {
+    return null;
+  }
+
+  const record = teams[pickStableIndexForColumns("matt-offseason-team-recap", teams.length)];
+  const realSignings = record.signings.filter((signing) => signing.type !== "minor-league-signing");
+  const signingLines = realSignings.map(
+    (signing) => `${signing.player} (${signing.position}, ${formatMoney(signing.totalValue)} over ${signing.years} year${signing.years === 1 ? "" : "s"})`,
+  );
+  const departureLines = record.departures.map(
+    (departure) => `${departure.player}${departure.type === "release" ? " (released)" : " (hit free agency)"}`,
+  );
+
+  const pieces = [];
+  if (signingLines.length) pieces.push(`brought in ${signingLines.join(", ")}`);
+  if (departureLines.length) pieces.push(`let ${departureLines.join(", ")} go`);
+  if (record.trades.length) pieces.push(`made ${record.trades.length} trade${record.trades.length === 1 ? "" : "s"}`);
+
+  if (!pieces.length) {
+    return null;
+  }
+
+  const outlookVariants = [
+    `My take on ${record.team} heading into next year: ${
+      record.totalCommitted > 0
+        ? "they spent like a team that believes it is already close."
+        : "this was a quiet winter on the open market, and a quiet winter like that usually means the front office trusts what is already in the room."
+    }`,
+    `Where that leaves ${record.team}: ${
+      record.totalCommitted > 1_000_000
+        ? "the dollars committed say they are not rebuilding, they are reloading."
+        : "there is no big bet here, which tells me the plan is internal development, not a splash."
+    }`,
+  ];
+  const outlook = outlookVariants[pickStableIndexForColumns(`matt-offseason-team-outlook:${record.team}`, outlookVariants.length)];
+
+  const body = `${record.team} spent the winter doing real business. They ${pieces.join("; ")}.
+
+${outlook}
+
+I do not grade an offseason by the press release, I grade it by whether the moves answer a real question the roster was asking. On that measure, ${record.team} at least walks into camp with fewer open questions than it had in October.`;
+
+  return {
+    headline: `Matt Gropius: What ${record.team}'s Winter Actually Bought Them`,
+    body,
+    topicKey: "matt:offseason:team-recap",
+    targetKey: `offseason-team-recap:${record.team}`,
+  };
+}
+
+// Topic 3: a prediction for a random division's upcoming season, grounded
+// in who actually finished on top last time and whether that team did
+// anything this winter to defend it.
+function buildMattDivisionPredictionCandidate(snapshot, digest) {
+  const divisions = (snapshot?.standingsSections ?? []).filter((section) => section.kind === "division" && section.rows?.length);
+  if (!divisions.length) {
+    return null;
+  }
+
+  const division = divisions[pickStableIndexForColumns("matt-offseason-division-call", divisions.length)];
+  const leaderRow = division.rows.find((row) => parseGamesBackValue(row.GB) === 0) ?? division.rows[0];
+  const leaderName = leaderRow?.Team;
+  if (!leaderName) {
+    return null;
+  }
+
+  const challengerRow = division.rows.find((row) => row.Team !== leaderName);
+  // division.label looks like "DIVISION ROSENTHAL" (no conference prefix
+  // to strip, unlike the per-team divisionLabel field
+  // simplifyMattDivisionLabel is normally used on) — drop the leading
+  // "DIVISION" word so the headline reads "the Rosenthal Race" instead of
+  // "the DIVISION ROSENTHAL Race".
+  const divisionLabel = simplifyMattDivisionLabel(division.label)
+    .replace(/^DIVISION\s+/i, "")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const leaderActivity = digest.byTeam.get(leaderName);
+  const leaderReinforced = Boolean(
+    leaderActivity?.signings.some((signing) => signing.type !== "minor-league-signing") || leaderActivity?.totalCommitted > 0,
+  );
+
+  const reinforcementLine = leaderReinforced
+    ? `They also did not stand still this winter, which is exactly the part that should worry everyone else chasing them.`
+    : `They have not made much noise this winter, which is the one thing that could open a door for somebody else in this division.`;
+
+  const challengerLine = challengerRow
+    ? `The team I would not ignore is ${challengerRow.Team} — close enough in the standings last time that one good winter closes the rest of the gap.`
+    : `Nobody else in this division finished close enough last time to call this a real argument yet.`;
+
+  const body = `Division calls this early come down to who returns with the fewest questions, so let me take ${divisionLabel}.
+
+${leaderName} finished on top here last time, and I like them to still be standing there when this one gets settled. ${reinforcementLine}
+
+${challengerLine}
+
+My early call: ${leaderName} wins it again, but I would not bet the house on the margin being as comfortable as it was the last time around.`;
+
+  return {
+    headline: `Matt Gropius: My Early Call on the ${divisionLabel} Race`,
+    body,
+    topicKey: "matt:offseason:division-call",
+    targetKey: `offseason-division-call:${division.label}`,
+  };
+}
+
+// Topic 4: the top three offseason teams, judged by actual guaranteed
+// dollars committed on the open market — the one offseason "quality"
+// signal that is not just Matt's opinion dressed up as data.
+function buildMattBestOffseasonTeamsCandidate(digest) {
+  const ranked = digest.teamSpendRanking.filter((row) => row.totalCommitted > 0).slice(0, 3);
+  if (ranked.length < 2) {
+    return null;
+  }
+
+  const lines = ranked.map(
+    (row, index) =>
+      `${index + 1}. ${row.team} — ${formatMoney(row.totalCommitted)} committed across ${row.signingCount} major league signing${row.signingCount === 1 ? "" : "s"}.`,
+  );
+
+  const body = `Judge an offseason by what a team was actually willing to guarantee, and here is where the real money went:
+
+${lines.join("\n")}
+
+${ranked[0].team} tops the list, and by enough that nobody else should feel good about matching it on short notice. Writing the biggest check does not win anything by itself, but it does mean a front office believes its own roster enough to bet real dollars on it — and that belief is usually a better predictor than people want to admit.`;
+
+  return {
+    headline: "Matt Gropius: My Top Three Offseason Winners",
+    body,
+    topicKey: "matt:offseason:best-teams",
+    targetKey: `offseason-best-teams:${ranked.map((row) => row.team).join("|")}`,
+  };
+}
+
+// Topic 5: the three quietest offseason teams — the fewest guaranteed
+// dollars committed, weighted toward teams that also let players walk.
+function buildMattWorstOffseasonTeamsCandidate(digest) {
+  const candidates = digest.teamSpendRanking.filter((row) => row.departureCount > 0 || row.totalCommitted === 0);
+  if (candidates.length < 2) {
+    return null;
+  }
+
+  const ranked = [...candidates]
+    .sort((left, right) => {
+      const diff = left.totalCommitted - right.totalCommitted;
+      if (diff !== 0) return diff;
+      return right.departureCount - left.departureCount;
+    })
+    .slice(0, 3);
+
+  const lines = ranked.map((row, index) => {
+    const spendPart = row.totalCommitted > 0 ? `only ${formatMoney(row.totalCommitted)} committed` : "nothing guaranteed on the open market";
+    const departurePart = row.departureCount > 0 ? ` while letting ${row.departureCount} player${row.departureCount === 1 ? "" : "s"} walk away` : "";
+    return `${index + 1}. ${row.team} — ${spendPart}${departurePart}.`;
+  });
+
+  const body = `Not every team wanted to be part of the conversation this winter, and three in particular made that very clear:
+
+${lines.join("\n")}
+
+I am not calling these teams lost, I am calling them quiet — and in this business, quiet is a choice. ${ranked[0].team} did the least to convince anyone the roster is getting better, and that is the kind of winter that ends up getting measured by the standings instead of the transaction log.`;
+
+  return {
+    headline: "Matt Gropius: Three Teams That Had a Quiet Winter",
+    body,
+    topicKey: "matt:offseason:worst-teams",
+    targetKey: `offseason-worst-teams:${ranked.map((row) => row.team).join("|")}`,
+  };
+}
+
 function buildMattCandidates(snapshot) {
+  // The offseason check comes first, same as the playoff check right below
+  // it — there is no live standings race or hot/cold streak to write about
+  // once the season has actually ended, so none of the in-season candidate
+  // builders below this point should ever fire while currentMode is
+  // OFFSEASON.
+  const offseasonCandidates = buildMattOffseasonCandidates(snapshot);
+  if (offseasonCandidates.length) {
+    return offseasonCandidates;
+  }
+
   const playoffCandidates = buildMattPlayoffCandidates(snapshot);
   if (playoffCandidates.length) {
     return playoffCandidates;
@@ -2482,6 +2732,15 @@ function getMattGropiusLore() {
   };
 }
 
+// Hardcoded to the league's actual 92-game schedule, matching
+// buildMattRemainingGames() below — this algorithmic fallback engine
+// doesn't receive the project config (league-config.json's
+// regularSeasonGames), so it mirrors that same constant rather than
+// threading config through buildColumns/buildSingleColumn's signatures.
+// Keep this in sync with config.mjs's default if the league's schedule
+// ever changes.
+const MATT_REGULAR_SEASON_GAMES = 92;
+
 function getMattTeamPool(snapshot) {
   const seen = new Set();
   const rows = [
@@ -2491,12 +2750,31 @@ function getMattTeamPool(snapshot) {
       .flatMap((section) => section.rows ?? [])),
   ];
 
+  // Once it's late season, a team that's out of realistic contention
+  // (behind by more games than it has left to play) isn't a candidate
+  // for Matt Gropius at all — a hot/cold streak doesn't make a
+  // "forming division race" angle make sense for a team that's already
+  // mathematically (or practically) done. See src/lib/seasonProgress.mjs.
+  const lateSeason = isLateSeason(snapshot.standingsSections ?? [], MATT_REGULAR_SEASON_GAMES);
+
   return rows.filter((row) => {
     const team = String(row?.Team ?? "").trim();
     if (!team || seen.has(team)) {
       return false;
     }
     seen.add(team);
+
+    if (lateSeason) {
+      const wins = Number.parseInt(row?.W ?? row?.wins ?? "", 10);
+      const losses = Number.parseInt(row?.L ?? row?.losses ?? "", 10);
+      const gamesRemaining = Number.isFinite(wins) && Number.isFinite(losses)
+        ? Math.max(MATT_REGULAR_SEASON_GAMES - wins - losses, 0)
+        : null;
+      if (isOutOfContention(row?.GB ?? row?.gb, gamesRemaining)) {
+        return false;
+      }
+    }
+
     return true;
   });
 }
@@ -2854,9 +3132,12 @@ function buildMattTeamCandidateVaried(snapshot, teamRecord, mattLore) {
     return buildMattTeamCandidate(teamRecord, mattLore);
   }
 
+  const context = buildMattContext(snapshot, teamName);
+  const prediction = buildMattRegularSeasonPrediction(context, teamName, success);
+
   return {
     headline: selectedVariant.headline,
-    body: selectedVariant.body,
+    body: prediction ? `${selectedVariant.body}\n\n${prediction}` : selectedVariant.body,
     topicKey: `matt:team:${teamName.toLowerCase()}:${selectedVariant.key}`,
     targetKey: `team:${teamName}`,
   };
@@ -3009,7 +3290,12 @@ function buildMattContext(snapshot, teamName) {
     gamesBackValue,
     remainingGames: buildMattRemainingGames(standing),
     isSuccessfulTeam,
-    isDivisionLeader: /^1st$/i.test(place),
+    // standing.place is never actually populated by findStandingsTeam (it
+    // only carries the raw Team/W/L/GB/L10/Strk/M# columns), so the old
+    // `/^1st$/i.test(place)` check could never be true. A team with GB "-"
+    // (or "+something", a wildcard-leader notation that also parses to 0)
+    // and a real record on the board is the one actually sitting in first.
+    isDivisionLeader: gamesBackValue === 0 && Boolean(wins || losses),
   };
 }
 
@@ -3396,6 +3682,39 @@ function buildMattRemainingGames(standing) {
   return remaining >= 0 ? remaining : null;
 }
 
+// A genuine, falsifiable forward-looking call — not just a status report on
+// where things stand today. Mirrors what buildMattPlayoffPrediction already
+// does for a live playoff series, applied to the regular-season division
+// race instead. Kept as one small, separate appended paragraph (rather than
+// woven into the variant-selection system above) so it applies uniformly
+// to every regular-season body regardless of which variant gets picked.
+function buildMattRegularSeasonPrediction(context, teamName, signalIsPositive) {
+  if (!teamName) {
+    return "";
+  }
+
+  const callPrefix = "If you want the ex-player pick, here it is:";
+  const remaining = context?.remainingGames;
+  const gamesBack = context?.gamesBackValue;
+
+  if (context?.isDivisionLeader) {
+    return signalIsPositive
+      ? `${callPrefix} ${teamName} are still the team standing in first the day this division gets decided.`
+      : `${callPrefix} this cushion gets tested hard before it is safe, but ${teamName} are still the team holding the division when the dust settles.`;
+  }
+
+  if (Number.isFinite(gamesBack) && gamesBack > 0) {
+    if (signalIsPositive && Number.isFinite(remaining) && gamesBack <= remaining) {
+      return `${callPrefix} ${teamName} are tied for the lead, or ahead of it, inside the next couple of weeks if this keeps up.`;
+    }
+    if (!signalIsPositive) {
+      return `${callPrefix} that gap gets wider, not smaller, the next time anybody checks the standings.`;
+    }
+  }
+
+  return `${callPrefix} this stretch is still the story people point back to once this race gets settled.`;
+}
+
 function buildMattStreakBody(snapshot, teamName, context, streakInfo, lastTenInfo, seasonMode, signalKey) {
   const signalIsPositive = streakInfo?.type === "win" || (lastTenInfo?.wins ?? 0) >= 7;
   const signalContext = signalIsPositive ? context : { ...context, isSuccessfulTeam: false };
@@ -3424,7 +3743,9 @@ function buildMattStreakBody(snapshot, teamName, context, streakInfo, lastTenInf
     key: `shape-${index}`,
     body: parts.filter(Boolean).join("\n\n"),
   }));
-  return (selectMattVariant(snapshot, teamName, `streak:${signalKey}`, variants) ?? variants[0]).body;
+  const base = (selectMattVariant(snapshot, teamName, `streak:${signalKey}`, variants) ?? variants[0]).body;
+  const prediction = buildMattRegularSeasonPrediction(signalContext, teamName, signalIsPositive);
+  return prediction ? `${base}\n\n${prediction}` : base;
 }
 
 function buildMattEvidenceLine(context, mode = "success") {
